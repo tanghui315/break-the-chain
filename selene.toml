@@ -1,0 +1,2 @@
+# src/ 运行在 Roblox 引擎中
+std = "roblox"

@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      # Rokit 下载工具时使用，避免 GitHub API 匿名限流
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rokit
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/rojo-rbx/rokit/main/scripts/install.sh | bash -s -- 1.2.0
+          echo "$HOME/.rokit/bin" >> "$GITHUB_PATH"
+
+      - name: Install toolchain (rokit.toml)
+        run: rokit install --no-trust-check
+
+      - name: Format (StyLua)
+        run: stylua --check src tests
+
+      - name: Lint (Selene)
+        run: |
+          selene src
+          selene --config tests/lune/selene.toml tests/lune
+
+      - name: Type check pure modules (luau-lsp, strict)
+        run: >
+          luau-lsp analyze --platform=standard
+          src/server/logic
+          src/shared/BalanceConfig.luau
+          src/shared/Types.luau
+          src/shared/StateLabels.luau
+          src/shared/Constants.luau
+          src/shared/PublicEventTypes.luau
+
+      - name: Unit tests (Lune)
+        run: lune run tests/lune/run
+
+      - name: Build place (Rojo)
+        run: rojo build default.project.json -o build.rbxl

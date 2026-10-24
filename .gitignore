@@ -1,0 +1,18 @@
+# Rojo 构建产物
+*.rbxl
+*.rbxlx
+*.rbxm.lock
+sourcemap.json
+
+# Wally
+Packages/
+ServerPackages/
+DevPackages/
+
+# selene 自动生成的 Roblox 标准库定义
+roblox.yml
+
+# 系统与编辑器
+.DS_Store
+.vscode/
+__pycache__/

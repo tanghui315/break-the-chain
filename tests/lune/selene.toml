@@ -1,0 +1,2 @@
+# tests/lune/ 运行在 Lune 中，只使用标准 Luau
+std = "luau"

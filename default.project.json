@@ -1,0 +1,31 @@
+{
+  "name": "BreakTheChain",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "Shared": {
+        "$path": "src/shared"
+      },
+      "Remotes": {
+        "$path": "src/remotes"
+      }
+    },
+    "ServerScriptService": {
+      "Game": {
+        "$path": "src/server"
+      }
+    },
+    "ServerStorage": {
+      "GameAssets": {
+        "$path": "src/assets"
+      }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "Controllers": {
+          "$path": "src/client"
+        }
+      }
+    }
+  }
+}
