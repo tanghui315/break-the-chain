@@ -16,3 +16,10 @@ roblox.yml
 .DS_Store
 .vscode/
 __pycache__/
+
+# 密钥（素材生成管线 API key），权限 0600
+.env.local
+.env.*.local
+
+# 生成管线原始产物
+production/*/raw/
