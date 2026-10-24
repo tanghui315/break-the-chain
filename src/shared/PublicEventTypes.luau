@@ -10,10 +10,15 @@ PublicEventTypes.Public = table.freeze({
 	InfectionRevealed = "InfectionRevealed",
 	ChainCutNearby = "ChainCutNearby",
 	ExtractionOpened = "ExtractionOpened",
+	RoundPhaseChanged = "RoundPhaseChanged",
 	RoundResult = "RoundResult",
 })
 
 PublicEventTypes.Private = table.freeze({
+	-- Gate A0：回合开始时告知本人 ParticipantId
+	YouAre = "YouAre",
+	-- Gate A0：扑咬请求的私有判定结果（命中、原因码、服务端冷却时刻）
+	BiteResult = "BiteResult",
 	YouAreIncubating = "YouAreIncubating",
 	YouAreUnstable = "YouAreUnstable",
 	ScannerResults = "ScannerResults",

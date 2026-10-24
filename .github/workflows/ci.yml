@@ -34,6 +34,7 @@ jobs:
         run: >
           luau-lsp analyze --platform=standard
           src/server/logic
+          src/server/world/GreyboxLayout.luau
           src/shared/BalanceConfig.luau
           src/shared/Types.luau
           src/shared/StateLabels.luau

@@ -59,20 +59,32 @@ local BalanceConfig = {
 		HumanSprintSpeed = 23,
 		SprintMaxSeconds = 5,
 		StaminaRegenRatio = 0.5,
+		SprintMinStartSeconds = 0.5,
 		ZombieRunSpeed = 18,
 		UnstableRunSpeed = 17,
 		LungeDistance = 9,
 		LungeSeconds = 0.25,
 		BiteMissRecoverySeconds = 0.6,
+		BiteCommitSlackSeconds = 0.15,
 		BiteRange = 5.5,
 		BiteTolerance = 1.5,
 		BiteConeDegrees = 70,
+		HistorySeconds = 1,
+		HistoryHz = 20,
+		MaxRewindSeconds = 0.25,
 		CureRange = 8,
 		RelinkRange = 8,
 		RelayRange = 7,
 		ExtractZoneDiameter = 16,
 		ExtractHoldSeconds = 2,
 		ScanRadius = 50,
+	},
+
+	-- Gate A0 纯追逐原型（无治愈/感染树）的回合参数
+	A0 = {
+		PrepareSeconds = 20, -- 与顶层 PrepareSeconds 保持一致
+		RoundSeconds = 180,
+		SeedCount = 1,
 	},
 
 	PlayerCountTiers = {

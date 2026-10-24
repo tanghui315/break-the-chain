@@ -21,9 +21,19 @@ Constants.RoundPhase = table.freeze({
 	RESULT = "RESULT",
 })
 
+-- 公开属性键（§17.6、§20.4）。A0 中阵营与耐力本来就对所有人可见，可以放进角色/玩家属性；
+-- 感染树、扫描结果等秘密信息以后也不得写进这里。
+Constants.Attribute = table.freeze({
+	State = "BTC_State", -- 角色 Model 上的 HUMAN / INCUBATING / INFECTED
+	Stamina = "BTC_Stamina", -- 真人 Player 上的 0..1 耐力
+	ParticipantId = "BTC_ParticipantId", -- 角色 Model 上的 ParticipantId，供客户端选择扑咬提示目标
+})
+
 -- 客户端通过 RequestAction 只能发送这些意图（§20.4）
 Constants.Action = table.freeze({
 	TryBite = "TryBite",
+	StartBite = "StartBite",
+	SetSprint = "SetSprint",
 	StartCure = "StartCure",
 	TryRelink = "TryRelink",
 	StartRelay = "StartRelay",
