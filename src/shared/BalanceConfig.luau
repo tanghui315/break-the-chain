@@ -10,6 +10,10 @@ export type PlayerCountTier = {
 	seedCount: number,
 	powerRelays: number,
 	cures: number,
+	pistols: number,
+	tasers: number,
+	ammoCrates: number,
+	zombieRespawnSeconds: number,
 	requiredExtracted: number,
 	mapTier: "SMALL" | "MEDIUM" | "LARGE",
 }
@@ -44,6 +48,68 @@ local BalanceConfig = {
 	BiteWindupSeconds = 0.35,
 	BiteCooldownSeconds = 4,
 	StunDurationSeconds = 0.7,
+
+	-- 轻射击对抗层（§9A.9）。全部为 BASELINE / EXPERIMENT 起点，进入实测后按 §9A.5 的检查项调整。
+	WeaponsEnabled = true,
+	ZombieMaxHealth = 100,
+	ZombieRegenDelaySeconds = 4,
+	ZombieRegenPerSecond = 25,
+	RootHealthMultiplier = 1.25, -- 零号 125 生命：手枪 5 发（普通丧尸 4 发），只多一发
+	DownedSeconds = 4,
+	DownedMoveSpeed = 4,
+	LastZombieRespawnCapSeconds = 3,
+	RespawnMinDistanceFromHuman = 60,
+	RespawnMinDistanceFromExtraction = 80,
+	RespawnProtectionSeconds = 2,
+	ControlImmunitySeconds = 5,
+	StunSeconds = 1.5,
+	BiteMode = "GRAB" :: "INSTANT" | "GRAB",
+	GrabSeconds = 1.0,
+	GrabEscapeImmunitySeconds = 1.5,
+	GunshotPingSeconds = 2.5,
+	TouchAimAssistDegrees = 6,
+	ShotOriginToleranceStuds = 4,
+	AmmoCrateRefreshSeconds = 90,
+
+	-- 武器数值（§9A.4）。Melee.ConeDegrees 是“前方 ±”的半角；枪械全部为命中扫描，伤害按单发计算。
+	Weapons = {
+		Melee = {
+			Damage = 20,
+			Range = 6,
+			ConeDegrees = 60,
+			FireIntervalSeconds = 0.9,
+			KnockbackStuds = 6,
+		},
+		Pistol = {
+			Damage = 25,
+			Range = 80,
+			FireIntervalSeconds = 0.35,
+			MagazineSize = 6,
+			ReserveAmmo = 6,
+			ReloadSeconds = 1.5,
+			KnockbackStuds = 0, -- GDB §9A.4 未给手枪击退，按 0 落地
+		},
+		Taser = {
+			Damage = 0,
+			Range = 12,
+			Charges = 2,
+			CooldownSeconds = 8, -- 两发之间的冷却
+			StunSeconds = 1.5,
+			KnockbackStuds = 0,
+		},
+		-- EXP-07：8 studs 内 60，20 studs 线性衰减到 0，击退 10，4 发。
+		-- GDB 未给霰弹枪射击间隔与备弹，取 1.0 秒 / 无备弹（A0.5 不接入玩法）。
+		Shotgun = {
+			Damage = 60,
+			Range = 20,
+			FullDamageRangeStuds = 8,
+			FireIntervalSeconds = 1,
+			MagazineSize = 4,
+			ReserveAmmo = 0,
+			ReloadSeconds = 1.5,
+			KnockbackStuds = 10,
+		},
+	},
 
 	-- 扫描（§12）
 	ScanActiveSeconds = 10,
@@ -95,6 +161,10 @@ local BalanceConfig = {
 			seedCount = 1,
 			powerRelays = 1,
 			cures = 1,
+			pistols = 1,
+			tasers = 1,
+			ammoCrates = 1,
+			zombieRespawnSeconds = 6,
 			requiredExtracted = 1,
 			mapTier = "SMALL",
 		},
@@ -105,6 +175,10 @@ local BalanceConfig = {
 			seedCount = 1,
 			powerRelays = 2,
 			cures = 2,
+			pistols = 3,
+			tasers = 1,
+			ammoCrates = 2,
+			zombieRespawnSeconds = 8,
 			requiredExtracted = 2,
 			mapTier = "MEDIUM",
 		},
@@ -115,6 +189,10 @@ local BalanceConfig = {
 			seedCount = 2,
 			powerRelays = 3,
 			cures = 3,
+			pistols = 5,
+			tasers = 2,
+			ammoCrates = 3,
+			zombieRespawnSeconds = 10,
 			requiredExtracted = 4,
 			mapTier = "LARGE",
 		},
