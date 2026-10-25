@@ -76,6 +76,44 @@ local function makeKillPlane(folder: Folder): Part
 	return part
 end
 
+-- 地图标记只做可读的灰盒提示，不参与碰撞与射线（§9A.3、§9A.5）：
+-- 感染区是暗红平垫；枪械补给点与弹药箱点位是不同颜色的小方垫。
+local function makeMarker(
+	folder: Folder,
+	name: string,
+	position: GreyboxLayout.Vec3,
+	size: number,
+	color: Color3,
+	transparency: number
+): Part
+	local part = Instance.new("Part")
+	part.Name = name
+	part.Anchored = true
+	part.Size = Vector3.new(size, 0.12, size)
+	part.CFrame = CFrame.new(position.x, GreyboxLayout.floorTopY + 0.06, position.z)
+	part.Material = Enum.Material.Neon
+	part.Color = color
+	part.Transparency = transparency
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	part.CastShadow = false
+	part.Parent = folder
+	return part
+end
+
+local function makeMarkers(folder: Folder)
+	for index, point in GreyboxLayout.infectionZones do
+		makeMarker(folder, `InfectionZone{index}`, point, 14, VisualTokens.Color.Zombie, 0.72)
+	end
+	for index, point in GreyboxLayout.supplyPoints do
+		makeMarker(folder, `SupplyPoint{index}`, point, 5, VisualTokens.Color.Human, 0.45)
+	end
+	for index, point in GreyboxLayout.ammoCratePoints do
+		makeMarker(folder, `AmmoCratePoint{index}`, point, 4, VisualTokens.Color.Disconnected, 0.45)
+	end
+end
+
 local function makeFallbackSpawn(folder: Folder): SpawnLocation
 	local spawn = Instance.new("SpawnLocation")
 	spawn.Name = "FallbackSpawn"
@@ -111,6 +149,7 @@ function GreyboxBuilder.build(): BuildResult
 	for index, obstacle in GreyboxLayout.obstacles do
 		makeBlock(folder, obstacle, index)
 	end
+	makeMarkers(folder)
 	makeKillPlane(folder)
 	makeFallbackSpawn(folder)
 

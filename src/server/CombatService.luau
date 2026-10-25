@@ -9,8 +9,10 @@ local BalanceConfig = require(ReplicatedStorage.Shared.BalanceConfig)
 local PublicEventTypes = require(ReplicatedStorage.Shared.PublicEventTypes)
 local BiteRules = require(script.Parent.logic.BiteRules)
 local PositionHistory = require(script.Parent.logic.PositionHistory)
+local GrabService = require(script.Parent.GrabService)
 local ParticipantService = require(script.Parent.ParticipantService)
 local PlayerStateService = require(script.Parent.PlayerStateService)
+local ZombieCombatService = require(script.Parent.ZombieCombatService)
 
 export type BiteOutcome = {
 	hit: boolean,
@@ -114,7 +116,8 @@ end
 function CombatService.nearestHuman(
 	attackerId: string,
 	maxDistance: number,
-	coneOnly: boolean
+	coneOnly: boolean,
+	now: number
 ): ParticipantService.Participant?
 	local attacker = ParticipantService.getById(attackerId)
 	if attacker == nil then
@@ -134,7 +137,12 @@ function CombatService.nearestHuman(
 		if id ~= attackerId then
 			local state = PlayerStateService.stateFor(id)
 			local root = rootOf(participant)
-			if state == "HUMAN" and root ~= nil then
+			if
+				state == "HUMAN"
+				and root ~= nil
+				and not GrabService.isGrabbed(id)
+				and not GrabService.isBiteImmune(id, now)
+			then
 				local delta = root.Position - origin
 				local horizontal = Vector3.new(delta.X, 0, delta.Z)
 				local distance = horizontal.Magnitude
@@ -160,18 +168,24 @@ end
 -- 目标解析：优先相信客户端/ Bot 的 targetId 提示，但只把它当作候选；非法提示回退到最近合法人类。
 local function resolveTarget(
 	attackerId: string,
-	targetIdHint: string?
+	targetIdHint: string?,
+	now: number
 ): (ParticipantService.Participant?, PlayerStateService.Record?, BasePart?)
 	if targetIdHint ~= nil and targetIdHint ~= attackerId then
 		local participant = ParticipantService.getById(targetIdHint)
-		if participant ~= nil and PlayerStateService.stateFor(targetIdHint) == "HUMAN" then
+		if
+			participant ~= nil
+			and PlayerStateService.stateFor(targetIdHint) == "HUMAN"
+			and not GrabService.isGrabbed(targetIdHint)
+			and not GrabService.isBiteImmune(targetIdHint, now)
+		then
 			return participant, PlayerStateService.get(targetIdHint), rootOf(participant)
 		end
 	end
 
 	local searchRadius = BalanceConfig.Greybox.BiteRange + 2 * BalanceConfig.Greybox.BiteTolerance
-	local nearest = CombatService.nearestHuman(attackerId, searchRadius, true)
-		or CombatService.nearestHuman(attackerId, searchRadius, false)
+	local nearest = CombatService.nearestHuman(attackerId, searchRadius, true, now)
+		or CombatService.nearestHuman(attackerId, searchRadius, false, now)
 	if nearest == nil then
 		return nil, nil, nil
 	end
@@ -188,7 +202,28 @@ function CombatService.startBite(attackerId: string, now: number): (boolean, str
 	if not isAlive(participant) then
 		return false, "NO_CHARACTER"
 	end
-	return BiteRules.startBite(biteConfig, record, now)
+	-- §9A.3：倒地/死亡/电击中的丧尸不能开始扑咬；擒抱中的丧尸也不能再起咬。
+	if not ZombieCombatService.canAct(attackerId, now) then
+		return false, "NOT_ACTIVE"
+	end
+	if GrabService.isGrabbed(attackerId) or GrabService.hasGrab(attackerId) then
+		return false, "GRABBING"
+	end
+
+	local started, reason = BiteRules.startBite(biteConfig, record, now)
+	if not started then
+		return false, reason
+	end
+
+	-- §9A.3：主动攻击立即结束复活保护；§9A.4：前摇期间可被武器/电击打断。
+	ZombieCombatService.onAttack(attackerId, now)
+	if not ZombieCombatService.beginWindup(attackerId, now) then
+		record.windupStartedAt = nil
+		record.windupConsumed = true
+		record.biteCooldownUntil = now + BalanceConfig.BiteCooldownSeconds
+		return false, "NOT_ACTIVE"
+	end
+	return true, reason
 end
 
 -- 提交一次扑咬。targetIdHint 只用于选择被检验的目标，几何/视线/回溯仍由服务端重新计算。
@@ -203,7 +238,44 @@ function CombatService.tryBite(attackerId: string, targetIdHint: string?, now: n
 		return nil
 	end
 
-	local target, targetRecord = resolveTarget(attackerId, targetIdHint)
+	-- 倒地/死亡/电击/擒抱中都不能提交扑咬；前摇镜像也已在武器打断时清掉。
+	if not ZombieCombatService.canAct(attackerId, now) then
+		return {
+			hit = false,
+			reason = "NOT_ACTIVE",
+			cooldownUntil = attackerRecord.biteCooldownUntil,
+			nearMiss = false,
+			distance = nil,
+		}
+	end
+	if GrabService.isGrabbed(attackerId) or GrabService.hasGrab(attackerId) then
+		return {
+			hit = false,
+			reason = "GRABBING",
+			cooldownUntil = attackerRecord.biteCooldownUntil,
+			nearMiss = false,
+			distance = nil,
+		}
+	end
+
+	local target, targetRecord = resolveTarget(attackerId, targetIdHint, now)
+
+	-- §9A.6：擒抱被解除后 1.5 秒防扑咬保护。命中前就拒绝，避免 BiteRules 把一次“免疫”算作有效命中。
+	if target ~= nil and GrabService.isBiteImmune(target.id, now) then
+		local cooldownUntil = now + BalanceConfig.BiteCooldownSeconds
+		attackerRecord.biteCooldownUntil = cooldownUntil
+		attackerRecord.windupStartedAt = nil
+		attackerRecord.windupConsumed = true
+		ZombieCombatService.cancelWindup(attackerId)
+		return {
+			hit = false,
+			reason = "BITE_IMMUNE",
+			cooldownUntil = cooldownUntil,
+			nearMiss = false,
+			distance = nil,
+		}
+	end
+
 	local ping = pingSeconds(attacker)
 
 	local sampleTarget: (number) -> BiteRules.Vec3? = function(t: number): BiteRules.Vec3?
@@ -236,6 +308,12 @@ function CombatService.tryBite(attackerId: string, targetIdHint: string?, now: n
 		sampleTarget = sampleTarget,
 		losBlocked = losBlocked,
 	})
+
+	-- 只有真正消费掉本次前摇的提交才清镜像：TOO_EARLY 等早退仍保留前摇，
+	-- 否则后续武器命中无法按 §9A.4 打断这次尚未提交的扑咬。
+	if attackerRecord.windupConsumed then
+		ZombieCombatService.cancelWindup(attackerId)
+	end
 
 	if result.hit and target ~= nil and onBite ~= nil then
 		onBite(attackerId, target.id, now)

@@ -17,9 +17,12 @@ local Cleaner = require(script.Parent.util.Cleaner)
 local GreyboxLayout = require(script.Parent.world.GreyboxLayout)
 local BotService = require(script.Parent.BotService)
 local CombatService = require(script.Parent.CombatService)
+local GrabService = require(script.Parent.GrabService)
 local MovementService = require(script.Parent.MovementService)
 local ParticipantService = require(script.Parent.ParticipantService)
 local PlayerStateService = require(script.Parent.PlayerStateService)
+local WeaponService = require(script.Parent.WeaponService)
+local ZombieCombatService = require(script.Parent.ZombieCombatService)
 
 type Runtime = {
 	round: ChaseRound.Round,
@@ -29,6 +32,9 @@ type Runtime = {
 	resultShownAt: number?,
 	lastTickAt: number,
 	spawnCursor: number,
+	-- MatchConfig.Tier 只声明对局规则子集；实际 tier 来自 BalanceConfig，含补给与复活档位。
+	tier: any,
+	suppliesStarted: boolean,
 }
 
 local RESULT_DISPLAY_SECONDS = 8
@@ -94,7 +100,7 @@ local function broadcastPhase(rt: Runtime)
 end
 
 -- 把 ChaseRound 的公开事件翻译成状态属性与网络广播。状态本身在应用事件时再计算。
-local function applyEvents(rt: Runtime, events: ChaseRound.RoundEvents)
+local function applyEvents(rt: Runtime, events: ChaseRound.RoundEvents, now: number)
 	local needPhaseSnapshot = false
 	local needResult = false
 	local phaseChanged = false
@@ -116,6 +122,16 @@ local function applyEvents(rt: Runtime, events: ChaseRound.RoundEvents)
 					then "INCUBATING"
 					else "INFECTED"
 				PlayerStateService.setState(participantId, state)
+				if state == "INFECTED" then
+					-- 战斗生命状态与感染身份分开存储（§9A.3）；种子事件是零号，其余揭示是普通感染者。
+					ZombieCombatService.createFor(
+						participantId,
+						event.type == ChaseRound.EventType.OutbreakStarted,
+						now
+					)
+					-- §9A.5：尸变过渡结束时手持枪械掉落。
+					WeaponService.onInfected(participantId)
+				end
 				broadcast(event.type, {
 					participantId = participantId,
 					displayName = displayNameFor(participantId),
@@ -132,8 +148,16 @@ local function applyEvents(rt: Runtime, events: ChaseRound.RoundEvents)
 	if needResult then
 		broadcast(PublicEventTypes.Public.RoundResult, { winner = rt.round.winner })
 	end
+	if phaseChanged and rt.round.phase == "CONTEST" and not rt.suppliesStarted then
+		rt.suppliesStarted = true
+		WeaponService.beginContest(rt.cleaner, rt.tier, function(count: number): number
+			return randomGenerator:NextInteger(1, count)
+		end)
+	end
 	if phaseChanged and rt.round.phase == "RESULT" then
 		rt.resultShownAt = nil
+		-- 回合结束时擒抱立即解除，避免双方在结算横幅期间保持冻结（§9A.6）。
+		GrabService.clearAll()
 	end
 end
 
@@ -153,6 +177,8 @@ local function onCharacterAdded(rt: Runtime, participant: ParticipantService.Par
 	if record ~= nil then
 		PlayerStateService.restore(record)
 	end
+	-- 角色重新生成会取消进行中的擒抱（§19.5：重置/掉出地图取消读条类状态）。
+	GrabService.removeParticipant(participant.id)
 	rt.respawning[participant.id] = nil
 end
 
@@ -177,6 +203,7 @@ local function respawnParticipant(rt: Runtime, participant: ParticipantService.P
 		return
 	end
 	rt.respawning[participant.id] = true
+	GrabService.removeParticipant(participant.id)
 
 	if participant.kind == "Player" then
 		local player = participant.player
@@ -213,9 +240,17 @@ local function respawnParticipant(rt: Runtime, participant: ParticipantService.P
 	end
 end
 
-local function checkRespawns(rt: Runtime)
+local function checkRespawns(rt: Runtime, now: number)
 	for _, participant in ParticipantService.all() do
-		if not rt.respawning[participant.id] and characterNeedsRespawn(participant) then
+		local record = PlayerStateService.get(participant.id)
+		if record ~= nil and (record.state == "INFECTED" or record.state == "UNSTABLE") then
+			-- 擒抱中的丧尸掉出地图时先解除擒抱，避免人类被永久冻结。
+			if ZombieCombatService.isBelowKillPlane(participant.id) and GrabService.hasGrab(participant.id) then
+				GrabService.breakOnZombieHit(participant.id, now, "FALL")
+			end
+			-- 丧尸掉出地图：DEAD 忽略、DOWNED 放回最后合法位置、ACTIVE 直接死亡走完整复活（§9A.3）。
+			ZombieCombatService.handleFall(participant.id, now)
+		elseif not rt.respawning[participant.id] and characterNeedsRespawn(participant) then
 			respawnParticipant(rt, participant)
 		end
 	end
@@ -244,11 +279,18 @@ local function tickRuntime(rt: Runtime): boolean
 		rt.lastTickAt = now
 
 		CombatService.sample(now)
-		MovementService.step(now)
-		BotService.step(now)
+		-- 先推进回合与公开事件：种子/揭示在这里创建战斗记录并开始补给，再处理擒抱、战斗与武器。
+		applyEvents(rt, ChaseRound.tick(rt.round, now), now)
 
-		applyEvents(rt, ChaseRound.tick(rt.round, now))
-		checkRespawns(rt)
+		for _, grab in GrabService.tick(now) do
+			applyEvents(rt, ChaseRound.onBite(rt.round, grab.zombieId, grab.humanId, now), now)
+		end
+
+		ZombieCombatService.step(now)
+		MovementService.step(now)
+		WeaponService.step(now)
+		BotService.step(now)
+		checkRespawns(rt, now)
 
 		-- A0 没有中途加入：最后一名真人离开后不再让 Bot 单独跑完 3 分钟。
 		if not hasRealParticipants() then
@@ -263,6 +305,9 @@ local function cleanupRound()
 	local rt = runtime
 	runtime = nil
 
+	GrabService.reset()
+	WeaponService.reset()
+	ZombieCombatService.reset()
 	BotService.destroyAll()
 
 	if rt ~= nil then
@@ -271,6 +316,12 @@ local function cleanupRound()
 				local character = participant.player.Character
 				if character ~= nil then
 					character:SetAttribute(Constants.Attribute.State, nil)
+					character:SetAttribute(Constants.Attribute.Combat, nil)
+					character:SetAttribute(Constants.Attribute.Health, nil)
+					character:SetAttribute(Constants.Attribute.RespawnAt, nil)
+					character:SetAttribute(Constants.Attribute.Protected, nil)
+					character:SetAttribute(Constants.Attribute.Grabbed, nil)
+					character:SetAttribute(Constants.Attribute.Grabbing, nil)
 				end
 				participant.player:SetAttribute(Constants.Attribute.Stamina, nil)
 			end
@@ -286,6 +337,9 @@ local function cleanupRound()
 end
 
 local function startRound(snapshot: { Player })
+	GrabService.reset()
+	WeaponService.reset()
+	ZombieCombatService.reset()
 	ParticipantService.reset()
 	PlayerStateService.reset()
 	MovementService.reset()
@@ -330,10 +384,12 @@ local function startRound(snapshot: { Player })
 
 	for _, participant in liveParticipants do
 		PlayerStateService.createFor(participant)
+		WeaponService.createFor(participant.id)
 	end
 
+	local startedAt = serverNow()
 	local rt: Runtime = {
-		round = ChaseRound.new(BalanceConfig, participantIds, roundId, serverNow(), function(count: number): number
+		round = ChaseRound.new(BalanceConfig, participantIds, roundId, startedAt, function(count: number): number
 			return randomGenerator:NextInteger(1, count)
 		end),
 		cleaner = Cleaner.new(),
@@ -342,8 +398,12 @@ local function startRound(snapshot: { Player })
 		resultShownAt = nil,
 		lastTickAt = 0,
 		spawnCursor = 0,
+		tier = plan.tier,
+		suppliesStarted = false,
 	}
 	runtime = rt
+	WeaponService.configureRound(rt.cleaner)
+	ZombieCombatService.configure(rt.cleaner, startedAt, (plan.tier :: any).zombieRespawnSeconds)
 
 	-- 真人出生点尽量互不重叠；Bot 在 BotService 内部使用自己的游标。
 	for _, participant in liveParticipants do
@@ -393,7 +453,11 @@ local function handlePlayerRemoving(player: Player)
 	end
 
 	local id = participant.id
+	local leavingNow = serverNow()
 	RateLimiter.remove(rateLimiter, id)
+	GrabService.removeParticipant(id)
+	WeaponService.removeParticipant(id)
+	ZombieCombatService.remove(id)
 	ParticipantService.remove(id)
 	PlayerStateService.remove(id)
 
@@ -401,7 +465,7 @@ local function handlePlayerRemoving(player: Player)
 	if rt ~= nil then
 		rt.respawning[id] = nil
 		rt.spawnIndex[id] = nil
-		applyEvents(rt, ChaseRound.removeParticipant(rt.round, id, serverNow()))
+		applyEvents(rt, ChaseRound.removeParticipant(rt.round, id, leavingNow), leavingNow)
 	end
 end
 
@@ -442,6 +506,16 @@ local function handleAction(player: Player, payload: any)
 		if type(sprint) == "boolean" then
 			MovementService.setSprintIntent(participant.id, sprint)
 		end
+	elseif action == Constants.Action.Fire then
+		if rt.round.phase == "CONTEST" then
+			WeaponService.handleFire(player, payload, serverNow())
+		end
+	elseif action == Constants.Action.Reload then
+		if rt.round.phase == "CONTEST" then
+			WeaponService.handleReload(player)
+		end
+	elseif action == Constants.Action.SelectWeapon then
+		WeaponService.handleSelectWeapon(player, payload)
 	end
 	-- 其他动作名一律忽略（A0 不实现治愈/扫描/撤离等）
 end
@@ -479,7 +553,11 @@ function RoundService.start()
 		if rt == nil then
 			return
 		end
-		applyEvents(rt, ChaseRound.onBite(rt.round, attackerId, targetId, biteNow))
+		-- §9A.6：INSTANT 立即感染；GRAB 先进入 1 秒擒抱，完成时再走同一 ChaseRound.onBite。
+		local result = GrabService.start(attackerId, targetId, biteNow)
+		if result.infect then
+			applyEvents(rt, ChaseRound.onBite(rt.round, attackerId, targetId, biteNow), biteNow)
+		end
 	end)
 
 	if requestAction ~= nil then

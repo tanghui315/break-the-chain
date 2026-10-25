@@ -133,6 +133,65 @@ describe("出生点", function()
 	end)
 end)
 
+describe("战斗地图点位（§9A.3、§9A.5）", function()
+	local function pointsClearOfSolid(points: { GreyboxLayout.Vec3 }, margin: number): boolean
+		local half = GreyboxLayout.mapSize / 2 - margin
+		for _, point in points do
+			if math.abs(point.x) > half or math.abs(point.z) > half then
+				return false
+			end
+			if point.y ~= GreyboxLayout.floorTopY then
+				return false
+			end
+			if insideSolid(point.x, point.z, margin) then
+				return false
+			end
+		end
+		return true
+	end
+
+	it("至少 3 个感染区，四角/边缘展开且不压墙", function()
+		expect(#GreyboxLayout.infectionZones >= 3).toBe(true)
+		expect(pointsClearOfSolid(GreyboxLayout.infectionZones, 2)).toBe(true)
+
+		local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
+		for _, point in GreyboxLayout.infectionZones do
+			minX = math.min(minX, point.x)
+			maxX = math.max(maxX, point.x)
+			minZ = math.min(minZ, point.z)
+			maxZ = math.max(maxZ, point.z)
+		end
+		expect(maxX - minX >= GreyboxLayout.mapSize * 0.6).toBe(true)
+		expect(maxZ - minZ >= GreyboxLayout.mapSize * 0.6).toBe(true)
+	end)
+
+	it("至少 8 个枪械补给点（LARGE 需要 7），且互不重叠、不压墙", function()
+		expect(#GreyboxLayout.supplyPoints >= 8).toBe(true)
+		expect(pointsClearOfSolid(GreyboxLayout.supplyPoints, 2)).toBe(true)
+		for i = 1, #GreyboxLayout.supplyPoints do
+			for j = i + 1, #GreyboxLayout.supplyPoints do
+				local a = GreyboxLayout.supplyPoints[i]
+				local b = GreyboxLayout.supplyPoints[j]
+				local dx = a.x - b.x
+				local dz = a.z - b.z
+				expect(math.sqrt(dx * dx + dz * dz) >= 6).toBe(true)
+			end
+		end
+	end)
+
+	it("至少 3 个弹药箱点位，且与枪械补给点分开", function()
+		expect(#GreyboxLayout.ammoCratePoints >= 3).toBe(true)
+		expect(pointsClearOfSolid(GreyboxLayout.ammoCratePoints, 2)).toBe(true)
+		for _, crate in GreyboxLayout.ammoCratePoints do
+			for _, supply in GreyboxLayout.supplyPoints do
+				local dx = crate.x - supply.x
+				local dz = crate.z - supply.z
+				expect(math.sqrt(dx * dx + dz * dz) > 2).toBe(true)
+			end
+		end
+	end)
+end)
+
 describe("Bot 路点图", function()
 	it("每条边都连接已存在的路点且长度 > 0", function()
 		expect(#GreyboxLayout.edges > 0).toBe(true)

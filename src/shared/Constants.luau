@@ -27,6 +27,13 @@ Constants.Attribute = table.freeze({
 	State = "BTC_State", -- 角色 Model 上的 HUMAN / INCUBATING / INFECTED
 	Stamina = "BTC_Stamina", -- 真人 Player 上的 0..1 耐力
 	ParticipantId = "BTC_ParticipantId", -- 角色 Model 上的 ParticipantId，供客户端选择扑咬提示目标
+	-- 以下战斗状态都是公开信息（§9A、§17.6）：动作与生命条本来就会被所有人看见。
+	Combat = "BTC_Combat", -- 丧尸角色上的 ACTIVE / DOWNED / DEAD / STUNNED
+	Health = "BTC_Health", -- 丧尸角色上的 0..1 生命比例
+	RespawnAt = "BTC_RespawnAt", -- DEAD 时的服务端复活时刻（Workspace:GetServerTimeNow）
+	Protected = "BTC_Protected", -- 复活保护公开布尔状态（§9A.3）
+	Grabbed = "BTC_Grabbed", -- 人类被擒抱（§9A.6）
+	Grabbing = "BTC_Grabbing", -- 丧尸正在擒抱（§9A.6）
 })
 
 -- 客户端通过 RequestAction 只能发送这些意图（§20.4）
@@ -34,6 +41,9 @@ Constants.Action = table.freeze({
 	TryBite = "TryBite",
 	StartBite = "StartBite",
 	SetSprint = "SetSprint",
+	Fire = "Fire",
+	Reload = "Reload",
+	SelectWeapon = "SelectWeapon",
 	StartCure = "StartCure",
 	TryRelink = "TryRelink",
 	StartRelay = "StartRelay",

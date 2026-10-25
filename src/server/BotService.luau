@@ -11,9 +11,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local BalanceConfig = require(ReplicatedStorage.Shared.BalanceConfig)
 local GreyboxLayout = require(script.Parent.world.GreyboxLayout)
 local CombatService = require(script.Parent.CombatService)
+local GrabService = require(script.Parent.GrabService)
 local MovementService = require(script.Parent.MovementService)
 local ParticipantService = require(script.Parent.ParticipantService)
 local PlayerStateService = require(script.Parent.PlayerStateService)
+local WeaponService = require(script.Parent.WeaponService)
+local ZombieCombatService = require(script.Parent.ZombieCombatService)
 
 type BotAI = {
 	botIndex: number,
@@ -22,12 +25,16 @@ type BotAI = {
 	biteTargetId: string?,
 	windupEndsAt: number?,
 	wanderAt: number,
+	shootTargetId: string?,
+	shootReadyAt: number,
 }
 
 local THINK_INTERVAL = 0.25
 local WANDER_INTERVAL = 3
 local THREAT_RADIUS = 40
 local ZOMBIE_SIGHT_RADIUS = 80
+local PICKUP_PATH_RADIUS = 80
+local SHOOT_REACTION_SECONDS = 0.4
 local MAP_COLLISION_GROUP = "MapStatic"
 
 local ais: { [string]: BotAI } = {}
@@ -64,6 +71,26 @@ local function humanoidOf(participant: ParticipantService.Participant): Humanoid
 		return nil
 	end
 	return character:FindFirstChildOfClass("Humanoid")
+end
+
+local function headOf(participant: ParticipantService.Participant): BasePart?
+	local character = participant.character
+	if character == nil then
+		return nil
+	end
+	local head = character:FindFirstChild("Head")
+	if head ~= nil and head:IsA("BasePart") then
+		return head
+	end
+	return nil
+end
+
+local function isActiveZombie(id: string, now: number): boolean
+	return PlayerStateService.stateFor(id) == "INFECTED" and ZombieCombatService.canAct(id, now)
+end
+
+local function isHittableZombie(id: string, now: number): boolean
+	return PlayerStateService.stateFor(id) == "INFECTED" and ZombieCombatService.canBeHit(id, now)
 end
 
 local function spawnPosition(spawnIndex: number): Vector3
@@ -151,6 +178,8 @@ function BotService.createBots(count: number, roundId: string, spawnOffset: numb
 				biteTargetId = nil,
 				windupEndsAt = nil,
 				wanderAt = 0,
+				shootTargetId = nil,
+				shootReadyAt = 0,
 			}
 			table.insert(created, participant)
 		else
@@ -178,6 +207,8 @@ function BotService.respawn(participant: ParticipantService.Participant): Model?
 		ai.biteTargetId = nil
 		ai.windupEndsAt = nil
 		ai.nextThinkAt = 0
+		ai.shootTargetId = nil
+		ai.shootReadyAt = 0
 	end
 	return model
 end
@@ -231,6 +262,15 @@ end
 local function stepZombie(id: string, participant: ParticipantService.Participant, ai: BotAI, now: number)
 	local root = rootOf(participant)
 	if root == nil then
+		return
+	end
+
+	-- §9A.3 / §9A.6：倒地/电击/死亡/擒抱中的 Bot 丧尸完全不动，也不保留前摇。
+	if not ZombieCombatService.canAct(id, now) or GrabService.isGrabbed(id) then
+		ai.windupEndsAt = nil
+		ai.biteTargetId = nil
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
 		return
 	end
 
@@ -326,11 +366,19 @@ local function stepZombie(id: string, participant: ParticipantService.Participan
 	end
 end
 
--- 人类 / 尸变中 Bot：有丧尸就选最远邻接路点逃离并冲刺；否则在路点间慢慢游荡。
+-- 人类 / 尸变中 Bot：有枪打最近的可见 ACTIVE 丧尸，近战打断前摇/擒抱；有丧尸就逃离，
+-- 没枪且附近没有丧尸时走向附近补给点；否则在路点间慢慢游荡（§9A.4、§9A.5）。
 local function stepHuman(id: string, participant: ParticipantService.Participant, ai: BotAI, now: number)
 	local root = rootOf(participant)
 	local humanoid = humanoidOf(participant)
-	if root == nil or humanoid == nil then
+	local record = PlayerStateService.get(id)
+	if root == nil or humanoid == nil or record == nil then
+		return
+	end
+
+	if GrabService.isGrabbed(id) then
+		MovementService.setSprintIntent(id, false)
+		humanoid:Move(Vector3.zero, false)
 		return
 	end
 
@@ -340,8 +388,22 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 	ai.nextThinkAt = now + THINK_INTERVAL
 
 	local origin = root.Position
+	local head = headOf(participant)
+	local humanActions = record.state == "HUMAN"
+	if humanActions then
+		WeaponService.reloadBotIfEmpty(id, now)
+	end
+
 	local threatPosition: Vector3? = nil
-	local threatDistance = math.huge
+	local nearbyZombie = false
+	local shootTarget: ParticipantService.Participant? = nil
+	local shootDistance = math.huge
+	local meleeTarget: ParticipantService.Participant? = nil
+	local meleeDistance = math.huge
+	local pistolRange = BalanceConfig.Weapons.Pistol.Range
+	local meleeRange = BalanceConfig.Weapons.Melee.Range
+	local hasPistol = humanActions and WeaponService.hasPistol(id)
+
 	for otherId, other in ParticipantService.all() do
 		if otherId ~= id and PlayerStateService.stateFor(otherId) == "INFECTED" then
 			local otherRoot = rootOf(other)
@@ -349,16 +411,61 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 				local delta = otherRoot.Position - origin
 				local horizontal = Vector3.new(delta.X, 0, delta.Z)
 				local distance = horizontal.Magnitude
+				local active = isActiveZombie(otherId, now)
+				if active and distance <= THREAT_RADIUS then
+					nearbyZombie = true
+					if threatPosition == nil then
+						threatPosition = otherRoot.Position
+					end
+				end
+
+				-- 射击目标按“可命中”而不是“可行动”筛选：电击中的丧尸仍是 ACTIVE，可以继续被打。
 				if
-					distance <= THREAT_RADIUS
-					and distance < threatDistance
-					and hasLineOfSight(participant.character, other.character, origin, otherRoot.Position)
+					hasPistol
+					and head ~= nil
+					and distance <= pistolRange
+					and distance < shootDistance
+					and isHittableZombie(otherId, now)
 				then
-					threatPosition = otherRoot.Position
-					threatDistance = distance
+					if hasLineOfSight(participant.character, other.character, head.Position, otherRoot.Position) then
+						shootTarget = other
+						shootDistance = distance
+					end
+				end
+
+				local grabTarget = GrabService.grabTargetOf(otherId)
+				local dangerous = active
+					and (ZombieCombatService.hasWindup(otherId) or (grabTarget ~= nil and grabTarget ~= id))
+				local headDistance = if head ~= nil then (otherRoot.Position - head.Position).Magnitude else distance
+				if humanActions and dangerous and headDistance <= meleeRange and headDistance < meleeDistance then
+					meleeTarget = other
+					meleeDistance = headDistance
 				end
 			end
 		end
+	end
+
+	-- 近战优先：前摇或擒抱中的丧尸值得立刻打断，哪怕 Bot 手上还有手枪。
+	if meleeTarget ~= nil and head ~= nil then
+		local zombieRoot = rootOf(meleeTarget)
+		if zombieRoot ~= nil then
+			WeaponService.fireBot(id, "Melee", head.Position, zombieRoot.Position - head.Position, now)
+		end
+	end
+
+	if shootTarget ~= nil and head ~= nil then
+		if ai.shootTargetId ~= shootTarget.id then
+			ai.shootTargetId = shootTarget.id
+			ai.shootReadyAt = now + SHOOT_REACTION_SECONDS
+		end
+		if now >= ai.shootReadyAt then
+			local zombieRoot = rootOf(shootTarget)
+			if zombieRoot ~= nil then
+				WeaponService.fireBot(id, "Pistol", head.Position, zombieRoot.Position - head.Position, now)
+			end
+		end
+	else
+		ai.shootTargetId = nil
 	end
 
 	if threatPosition ~= nil then
@@ -395,6 +502,16 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 	end
 
 	MovementService.setSprintIntent(id, false)
+	-- 没枪且附近没有丧尸：走向最近的枪械/电击枪补给点，拾取由 WeaponService 的服务端距离判定完成。
+	if humanActions and not nearbyZombie and not WeaponService.hasGun(id) then
+		local pickup = WeaponService.nearestPickupPosition(origin, PICKUP_PATH_RADIUS)
+		if pickup ~= nil then
+			ai.waypointId = nil
+			humanoid:MoveTo(Vector3.new(pickup.X, GreyboxLayout.floorTopY, pickup.Z))
+			return
+		end
+	end
+
 	if now < ai.wanderAt then
 		return
 	end

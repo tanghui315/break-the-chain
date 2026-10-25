@@ -328,6 +328,31 @@ function ZombieCombat.tick(z: Zombie, now: number, ctx: TickContext): { CombatEv
 	return events
 end
 
+-- 掉出地图 / 异常死亡：可行动丧尸按正常死亡处理，直接进入 DEAD 并走完整复活时间（§9A.3、§19.5）。
+-- 与 applyDamage 不同，这条路径不经过 DOWNED；倒地中的丧尸掉出地图不走这里（服务端放回最后合法位置）。
+-- 已经死亡时幂等返回空事件。respawnSeconds 非法时按 0 处理，避免 deadly 计时器变成 NaN 后永远不复活。
+function ZombieCombat.forceDeath(z: Zombie, now: number, respawnSeconds: number): { CombatEvent }
+	local events: { CombatEvent } = {}
+	if z.state == "DEAD" then
+		return events
+	end
+
+	local seconds = respawnSeconds
+	if seconds ~= seconds or seconds < 0 then
+		seconds = 0
+	end
+
+	z.state = "DEAD"
+	z.health = 0
+	z.downedUntil = nil
+	z.deadUntil = now + seconds
+	z.respawnReady = false
+	z.stunUntil = now
+	z.windupStartedAt = nil
+	table.insert(events, { type = EventType.DIED })
+	return events
+end
+
 -- 服务端选好感染区复活点后调用：恢复满血并给 2 秒复活保护（主动攻击时由 onAttack 立即结束）。
 -- 只有 DEAD 状态可以复活；电击与控制免疫在复活时清空。
 function ZombieCombat.respawn(z: Zombie, now: number): boolean

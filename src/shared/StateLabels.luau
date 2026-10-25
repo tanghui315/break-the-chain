@@ -17,6 +17,13 @@ local StateLabels: { [string]: Label } = {
 	ROOT = { key = "Tag.Source", en = "SOURCE", zh = "零号源头" },
 	CURE_IMMUNITY = { key = "Effect.Protected", en = "PROTECTED", zh = "受保护" },
 
+	-- §9A 丧尸战斗生命状态与擒抱效果（GDB §7.5）
+	DOWNED = { key = "State.Downed", en = "DOWNED", zh = "倒地" },
+	DEAD = { key = "State.Respawn", en = "RESPAWNING", zh = "复活中" },
+	STUNNED = { key = "State.Stunned", en = "STUNNED", zh = "电击中" },
+	GRABBED = { key = "Effect.Grabbed", en = "GRABBED", zh = "被抓住" },
+	GRABBING = { key = "Effect.Grabbing", en = "GRABBING", zh = "抓住中" },
+
 	-- 事件（不是状态）
 	CURE = { key = "Event.Cured", en = "CURED", zh = "已治愈" },
 	RELINK = { key = "Event.LinkRestored", en = "LINK RESTORED", zh = "重连成功" },

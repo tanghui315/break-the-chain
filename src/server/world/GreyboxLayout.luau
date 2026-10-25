@@ -52,6 +52,12 @@ export type Layout = {
 	doors: { Door },
 	corridors: { Corridor },
 	spawnPoints: { Vec3 },
+	-- §9A.3：丧尸复活点，每张图至少 2 处；A0.5 灰盒取四角，远离中部交火区。
+	infectionZones: { Vec3 },
+	-- §9A.5：开局补给点。手枪与电击枪从这里按人数档生成，LARGE 需要 7 个（5 手枪 + 2 电击枪）。
+	supplyPoints: { Vec3 },
+	-- §9A.5：弹药箱独立点位，不与枪械补给点复用，保证 LARGE 档 3 个箱子都有位置。
+	ammoCratePoints: { Vec3 },
 	waypoints: { Waypoint },
 	edges: { Edge },
 }
@@ -156,6 +162,37 @@ local spawnPoints: { Vec3 } = {
 	{ x = -70, y = 0, z = 0 },
 }
 
+-- 丧尸复活区：四角内侧。距外圈出生点约 17 studs，RespawnPicker 会优先选离人类最远的一处；
+-- 灰盒地图不大，没有合格点时会走 FALLBACK，这符合 §9A.3 的退化规则。
+local infectionZones: { Vec3 } = {
+	{ x = -82, y = 0, z = -82 },
+	{ x = 82, y = 0, z = -82 },
+	{ x = 82, y = 0, z = 82 },
+	{ x = -82, y = 0, z = 82 },
+}
+
+-- 枪械补给点：外圈走廊与大厅边角，避开柱子/掩体和出生点。共 10 个，满足 LARGE 档 7 把枪。
+local supplyPoints: { Vec3 } = {
+	{ x = -70, y = 0, z = -45 },
+	{ x = 0, y = 0, z = -58 },
+	{ x = 70, y = 0, z = -45 },
+	{ x = 55, y = 0, z = 0 },
+	{ x = 70, y = 0, z = 45 },
+	{ x = 0, y = 0, z = 58 },
+	{ x = -70, y = 0, z = 45 },
+	{ x = -55, y = 0, z = 0 },
+	{ x = -14, y = 0, z = -14 },
+	{ x = 14, y = 0, z = 14 },
+}
+
+-- 弹药箱点位：大厅四象限边缘，取用后 90 秒原地刷新（§9A.5）。
+local ammoCratePoints: { Vec3 } = {
+	{ x = 0, y = 0, z = -22 },
+	{ x = 22, y = 0, z = 0 },
+	{ x = 0, y = 0, z = 22 },
+	{ x = -22, y = 0, z = 0 },
+}
+
 -- 路点图：外圈环线 + 中央大厅轴线，所有连线都从门洞穿过或沿开阔走廊。
 local waypoints: { Waypoint } = {
 	{ id = "W1", position = { x = -70, y = 0, z = -70 } },
@@ -223,6 +260,9 @@ local Layout: Layout = {
 		})
 	end),
 	spawnPoints = freezeList(spawnPoints, freezeVec),
+	infectionZones = freezeList(infectionZones, freezeVec),
+	supplyPoints = freezeList(supplyPoints, freezeVec),
+	ammoCratePoints = freezeList(ammoCratePoints, freezeVec),
 	waypoints = freezeList(waypoints, function(waypoint)
 		return table.freeze({ id = waypoint.id, position = freezeVec(waypoint.position) })
 	end),

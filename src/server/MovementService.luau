@@ -21,7 +21,7 @@ function MovementService.setSprintIntent(participantId: string, wantSprint: bool
 	if record == nil then
 		return
 	end
-	if record.state ~= "HUMAN" then
+	if record.state ~= "HUMAN" or record.movementLocked then
 		record.sprintWanted = false
 		return
 	end
