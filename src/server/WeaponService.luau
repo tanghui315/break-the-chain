@@ -748,6 +748,31 @@ function WeaponService.onInfected(participantId: string)
 	dropGuns(participantId)
 end
 
+-- §7.4、§10.2：治愈 / 断联到期恢复人类时，给一套全新的近战起始装备。
+-- 不返还尸变时掉落的枪械（那些箱子仍在世界里，可被任何人类拾取）。
+function WeaponService.resetForHuman(participantId: string)
+	local entry = entries[participantId]
+	if entry == nil then
+		entry = {
+			inventory = Weapons.newInventory(weaponConfig),
+			selected = "Melee",
+		}
+		entries[participantId] = entry
+	else
+		entry.inventory = Weapons.newInventory(weaponConfig)
+		entry.selected = "Melee"
+	end
+	destroyAttachment(participantId)
+	sendState(participantId)
+	syncAttachment(participantId)
+end
+
+-- 角色（重新）生成后恢复手持模型与私有武器状态：不改变库存，只把视觉/客户端状态对齐。
+function WeaponService.syncFor(participantId: string)
+	sendState(participantId)
+	syncAttachment(participantId)
+end
+
 function WeaponService.handleFire(player: Player, payload: any, now: number)
 	local participant = ParticipantService.getByPlayer(player)
 	if participant == nil then

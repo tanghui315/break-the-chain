@@ -2,6 +2,7 @@
 -- 灰盒布局的尺寸与可达性测试（GDB V1.1 §24.4）：地图边界、走廊/门洞尺寸、出生点安全、路点图连通。
 
 local TestKit = require("./TestKit")
+local BalanceConfig = require("../../src/shared/BalanceConfig")
 local GreyboxLayout = require("../../src/server/world/GreyboxLayout")
 
 local describe, it, expect = TestKit.describe, TestKit.it, TestKit.expect
@@ -187,6 +188,75 @@ describe("战斗地图点位（§9A.3、§9A.5）", function()
 				local dx = crate.x - supply.x
 				local dz = crate.z - supply.z
 				expect(math.sqrt(dx * dx + dz * dz) > 2).toBe(true)
+			end
+		end
+	end)
+end)
+
+describe("撤离区与医院解药槽（§10.1、§13.2）", function()
+	local function nearestSpawnDistance(center: GreyboxLayout.Vec3): number
+		local best = math.huge
+		for _, spawnPoint in GreyboxLayout.spawnPoints do
+			local dx = spawnPoint.x - center.x
+			local dz = spawnPoint.z - center.z
+			best = math.min(best, math.sqrt(dx * dx + dz * dz))
+		end
+		return best
+	end
+
+	it("撤离区在中央街口、直径约 16，且远离人类出生点", function()
+		local zone = GreyboxLayout.extractionZone
+		expect(zone.diameter).toBe(16)
+		-- 与平衡配置的撤离判定直径保持一致，避免地图与规则漂移。
+		expect(zone.diameter).toBe((BalanceConfig :: any).Greybox.ExtractZoneDiameter)
+		expect(zone.center.y).toBe(GreyboxLayout.floorTopY)
+		expect(insideSolid(zone.center.x, zone.center.z, zone.diameter / 2)).toBe(false)
+		expect(math.abs(zone.center.x) <= GreyboxLayout.mapSize / 2).toBe(true)
+		expect(math.abs(zone.center.z) <= GreyboxLayout.mapSize / 2).toBe(true)
+		expect(nearestSpawnDistance(zone.center) >= 40).toBe(true)
+	end)
+
+	it("撤离区与感染区保持距离（§9A.3 复活点离撤离区足够远）", function()
+		local zone = GreyboxLayout.extractionZone
+		for _, infectionZone in GreyboxLayout.infectionZones do
+			local dx = infectionZone.x - zone.center.x
+			local dz = infectionZone.z - zone.center.z
+			expect(math.sqrt(dx * dx + dz * dz) >= 80).toBe(true)
+		end
+	end)
+
+	it("至少 3 个解药槽，都在医院端（西侧）且不压墙、互不重叠", function()
+		local slots = GreyboxLayout.cureSlots
+		expect(#slots >= 3).toBe(true)
+		for _, slot in slots do
+			expect(slot.y).toBe(GreyboxLayout.floorTopY)
+			expect(slot.x < -60).toBe(true)
+			expect(math.abs(slot.x) <= GreyboxLayout.mapSize / 2).toBe(true)
+			expect(math.abs(slot.z) <= GreyboxLayout.mapSize / 2).toBe(true)
+			expect(insideSolid(slot.x, slot.z, 2)).toBe(false)
+		end
+		for i = 1, #slots do
+			for j = i + 1, #slots do
+				local a = slots[i]
+				local b = slots[j]
+				local dx = a.x - b.x
+				local dz = a.z - b.z
+				expect(math.sqrt(dx * dx + dz * dz) >= 8).toBe(true)
+			end
+		end
+	end)
+
+	it("解药槽不与枪械补给点/弹药箱点位重叠", function()
+		for _, slot in GreyboxLayout.cureSlots do
+			for _, supply in GreyboxLayout.supplyPoints do
+				local dx = slot.x - supply.x
+				local dz = slot.z - supply.z
+				expect(math.sqrt(dx * dx + dz * dz) > 4).toBe(true)
+			end
+			for _, crate in GreyboxLayout.ammoCratePoints do
+				local dx = slot.x - crate.x
+				local dz = slot.z - crate.z
+				expect(math.sqrt(dx * dx + dz * dz) > 4).toBe(true)
 			end
 		end
 	end)

@@ -27,6 +27,21 @@ type BotAI = {
 	wanderAt: number,
 	shootTargetId: string?,
 	shootReadyAt: number,
+	-- 撤离期沿路点图走向撤离区（EXTRACTION 阶段才使用）。
+	exitWaypointId: string?,
+}
+
+-- Gate A-2b：Bot 只通过这组回调接触回合规则（解药 / 重连 / 撤离），
+-- 真正的请求仍由 RoundService 送入 RoundStateMachine，Bot 不绕过任何纯逻辑。
+export type Director = {
+	hasCure: (participantId: string) -> boolean,
+	nearestCureTarget: (participantId: string) -> string?,
+	nearestRelinkTarget: (participantId: string) -> string?,
+	nearestCurePickup: (origin: Vector3, maxDistance: number) -> Vector3?,
+	requestCure: (participantId: string, targetId: string) -> boolean,
+	requestRelink: (participantId: string, targetId: string) -> boolean,
+	isChanneling: (participantId: string) -> boolean,
+	extractionOpen: () -> boolean,
 }
 
 local THINK_INTERVAL = 0.25
@@ -51,7 +66,32 @@ for _, edge in GreyboxLayout.edges do
 	table.insert(adjacency[edge.b], edge.a)
 end
 
+-- 撤离路径：从中心路点 W9（撤离区中心）反向 BFS，得到每个路点朝出口的下一跳。
+-- Bot 沿门洞/走廊逐跳移动，避免直线 MoveTo 卡在内墙拐角。
+local EXIT_WAYPOINT = "W9"
+local exitNextHop: { [string]: string } = { [EXIT_WAYPOINT] = EXIT_WAYPOINT }
+do
+	local queue: { string } = { EXIT_WAYPOINT }
+	local head = 1
+	while head <= #queue do
+		local current = queue[head]
+		head += 1
+		for _, neighbor in adjacency[current] do
+			if exitNextHop[neighbor] == nil then
+				exitNextHop[neighbor] = current
+				table.insert(queue, neighbor)
+			end
+		end
+	end
+end
+
 local BotService = {}
+
+local director: Director? = nil
+
+function BotService.setDirector(value: Director?)
+	director = value
+end
 
 local function rootOf(participant: ParticipantService.Participant): BasePart?
 	local character = participant.character
@@ -209,6 +249,7 @@ function BotService.respawn(participant: ParticipantService.Participant): Model?
 		ai.nextThinkAt = 0
 		ai.shootTargetId = nil
 		ai.shootReadyAt = 0
+		ai.exitWaypointId = nil
 	end
 	return model
 end
@@ -256,6 +297,38 @@ local function moveToWaypoint(participant: ParticipantService.Participant, ai: B
 	end
 	ai.waypointId = waypointId
 	humanoid:MoveTo(Vector3.new(waypoint.position.x, waypoint.position.y, waypoint.position.z))
+end
+
+-- 沿路点图逐跳走向撤离区中心（W9），每到达一跳附近再前进，避免直线穿越内墙。
+local function moveTowardExit(ai: BotAI, origin: Vector3, humanoid: Humanoid)
+	local storedId = ai.exitWaypointId
+	local targetId: string
+	if storedId ~= nil then
+		targetId = storedId
+	else
+		local current = nearestWaypoint(origin)
+		local nextId: string? = nil
+		if current ~= nil then
+			nextId = exitNextHop[current]
+		end
+		targetId = nextId or EXIT_WAYPOINT
+		ai.exitWaypointId = targetId
+	end
+
+	local waypoint = waypointById[targetId]
+	if waypoint ~= nil then
+		local dx = waypoint.position.x - origin.X
+		local dz = waypoint.position.z - origin.Z
+		if math.sqrt(dx * dx + dz * dz) <= 5 then
+			local hop: string? = exitNextHop[targetId]
+			targetId = hop or EXIT_WAYPOINT
+			ai.exitWaypointId = targetId
+			waypoint = waypointById[targetId]
+		end
+	end
+	if waypoint ~= nil then
+		humanoid:MoveTo(Vector3.new(waypoint.position.x, waypoint.position.y, waypoint.position.z))
+	end
 end
 
 -- 丧尸：找人 → 追到判定距离内 → 起前摇 → 前摇结束冲刺并提交（与真人同一 tryBite）。
@@ -366,8 +439,65 @@ local function stepZombie(id: string, participant: ParticipantService.Participan
 	end
 end
 
+-- 断联 Bot（§11.2）：朝最近的稳定感染者移动，进入重连半径后按 1 秒读条请求重连；
+-- 没有目标时沿路点游荡，8 秒到期由 RoundStateMachine 自动恢复人类。
+local function stepUnstable(id: string, participant: ParticipantService.Participant, ai: BotAI, now: number)
+	local root = rootOf(participant)
+	local humanoid = humanoidOf(participant)
+	if root == nil or humanoid == nil then
+		return
+	end
+
+	if GrabService.isGrabbed(id) then
+		MovementService.setSprintIntent(id, false)
+		humanoid:Move(Vector3.zero, false)
+		return
+	end
+
+	if now < ai.nextThinkAt then
+		return
+	end
+	ai.nextThinkAt = now + THINK_INTERVAL
+
+	MovementService.setSprintIntent(id, false)
+	local activeDirector = director
+	if activeDirector ~= nil then
+		local targetId = activeDirector.nearestRelinkTarget(id)
+		if targetId ~= nil then
+			local target = ParticipantService.getById(targetId)
+			local targetRoot = if target ~= nil then rootOf(target) else nil
+			if targetRoot ~= nil then
+				local delta = targetRoot.Position - root.Position
+				local horizontal = Vector3.new(delta.X, 0, delta.Z)
+				if horizontal.Magnitude <= BalanceConfig.Greybox.RelinkRange * 0.9 then
+					if not activeDirector.isChanneling(id) then
+						activeDirector.requestRelink(id, targetId)
+					end
+					humanoid:Move(Vector3.zero, false)
+				else
+					humanoid:MoveTo(targetRoot.Position)
+				end
+				return
+			end
+		end
+	end
+
+	if now >= ai.wanderAt then
+		ai.wanderAt = now + WANDER_INTERVAL
+		local current = nearestWaypoint(root.Position)
+		local options: { string } = {}
+		if current ~= nil then
+			options = adjacency[current]
+		end
+		if #options > 0 then
+			moveToWaypoint(participant, ai, options[math.random(#options)])
+		end
+	end
+end
+
 -- 人类 / 尸变中 Bot：有枪打最近的可见 ACTIVE 丧尸，近战打断前摇/擒抱；有丧尸就逃离，
 -- 没枪且附近没有丧尸时走向附近补给点；否则在路点间慢慢游荡（§9A.4、§9A.5）。
+-- Gate A-2b：撤离期直奔出口；持有解药时走向可治愈目标并通过 requestCure 读条。
 local function stepHuman(id: string, participant: ParticipantService.Participant, ai: BotAI, now: number)
 	local root = rootOf(participant)
 	local humanoid = humanoidOf(participant)
@@ -390,8 +520,16 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 	local origin = root.Position
 	local head = headOf(participant)
 	local humanActions = record.state == "HUMAN"
+	local activeDirector = director
 	if humanActions then
 		WeaponService.reloadBotIfEmpty(id, now)
+	end
+
+	-- §13.2：撤离期人类 Bot 直奔撤离区；进入判定区后由 RoundStateMachine 自动起读条。
+	if humanActions and activeDirector ~= nil and activeDirector.extractionOpen() then
+		MovementService.setSprintIntent(id, true)
+		moveTowardExit(ai, origin, humanoid)
+		return
 	end
 
 	local threatPosition: Vector3? = nil
@@ -468,6 +606,29 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 		ai.shootTargetId = nil
 	end
 
+	-- §10.2：持有解药的 Bot 在没有即时威胁时走向可治愈目标，进入半径后走 requestCure（服务端读条）。
+	if humanActions and activeDirector ~= nil and activeDirector.hasCure(id) and threatPosition == nil then
+		local cureTargetId = activeDirector.nearestCureTarget(id)
+		if cureTargetId ~= nil then
+			local cureTarget = ParticipantService.getById(cureTargetId)
+			local cureRoot = if cureTarget ~= nil then rootOf(cureTarget) else nil
+			if cureRoot ~= nil then
+				local delta = cureRoot.Position - root.Position
+				local horizontal = Vector3.new(delta.X, 0, delta.Z)
+				MovementService.setSprintIntent(id, false)
+				if horizontal.Magnitude <= BalanceConfig.Greybox.CureRange * 0.9 then
+					if not activeDirector.isChanneling(id) then
+						activeDirector.requestCure(id, cureTargetId)
+					end
+					humanoid:Move(Vector3.zero, false)
+				else
+					humanoid:MoveTo(cureRoot.Position)
+				end
+				return
+			end
+		end
+	end
+
 	if threatPosition ~= nil then
 		MovementService.setSprintIntent(id, true)
 		local current = nearestWaypoint(origin)
@@ -502,6 +663,15 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 	end
 
 	MovementService.setSprintIntent(id, false)
+	-- §10.1：没有解药时优先去医院端补给槽；拾取由 CureService 的服务端距离判定完成。
+	if humanActions and not nearbyZombie and activeDirector ~= nil and not activeDirector.hasCure(id) then
+		local curePickup = activeDirector.nearestCurePickup(origin, PICKUP_PATH_RADIUS)
+		if curePickup ~= nil then
+			ai.waypointId = nil
+			humanoid:MoveTo(Vector3.new(curePickup.X, GreyboxLayout.floorTopY, curePickup.Z))
+			return
+		end
+	end
 	-- 没枪且附近没有丧尸：走向最近的枪械/电击枪补给点，拾取由 WeaponService 的服务端距离判定完成。
 	if humanActions and not nearbyZombie and not WeaponService.hasGun(id) then
 		local pickup = WeaponService.nearestPickupPosition(origin, PICKUP_PATH_RADIUS)
@@ -535,6 +705,8 @@ function BotService.step(now: number)
 			if ai ~= nil and record ~= nil then
 				if record.state == "INFECTED" then
 					stepZombie(id, participant, ai, now)
+				elseif record.state == "UNSTABLE" then
+					stepUnstable(id, participant, ai, now)
 				elseif record.state == "HUMAN" or record.state == "INCUBATING" then
 					stepHuman(id, participant, ai, now)
 				end

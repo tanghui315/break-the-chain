@@ -216,6 +216,7 @@ local Reason = table.freeze({
 	Replaced = "REPLACED",
 	Bitten = "BITTEN",
 	Left = "LEFT",
+	Cancelled = "CANCELLED",
 	Invalid = "INVALID",
 	OutbreakFailed = "OUTBREAK_FAILED",
 })
@@ -1089,6 +1090,22 @@ function RoundStateMachine.requestExtract(round: Round, actorId: string, now: nu
 		return rejected(Reason.Invalid)
 	end
 	round.now = at
+	return { ok = true, events = events }
+end
+
+-- 主动取消读条（§10.1、§21.2）：客户端释放交互键时调用，服务端按同一套取消规则清理。
+-- 治愈读条取消会进入短冷却并保留解药；重连/撤离取消只清元数据。没有读条时返回 INVALID。
+function RoundStateMachine.cancelChannel(round: Round, actorId: string, now: number, reason: string?): CommandResult
+	local at = currentTime(round, now)
+	local cancelReason = reason or Reason.Cancelled
+	local channel = ChannelTimer.cancel(round.channels, actorId, cancelReason)
+	if channel == nil then
+		return rejected(Reason.Invalid)
+	end
+	round.now = at
+
+	local events: { RoundEvent } = {}
+	handleCancelled(round, { { channel = channel, reason = cancelReason } }, at, events)
 	return { ok = true, events = events }
 end
 

@@ -1,5 +1,6 @@
 --!strict
 -- Gate A0 灰盒地图的纯数据布局（GDB V1.1 §24.4）：SMALL 约 180×180 studs，走廊宽 ≥ 10，门宽 ≥ 6、高 ≥ 9。
+-- Gate A-2b 增加撤离区（中央街口，四条门洞可达）与医院端解药补给槽（西侧走廊）。
 -- 纯模块：不引用任何 Roblox 全局对象，可在 Lune 中测试；GreyboxBuilder 只负责把数据变成 Part。
 
 export type Vec3 = { x: number, y: number, z: number }
@@ -40,6 +41,12 @@ export type Edge = {
 	b: string,
 }
 
+-- §13.2：撤离区是圆形判定区；中心 + 直径（BalanceConfig.Greybox.ExtractZoneDiameter）。
+export type ExtractionZone = {
+	center: Vec3,
+	diameter: number,
+}
+
 export type Layout = {
 	mapSize: number,
 	wallHeight: number,
@@ -58,6 +65,10 @@ export type Layout = {
 	supplyPoints: { Vec3 },
 	-- §9A.5：弹药箱独立点位，不与枪械补给点复用，保证 LARGE 档 3 个箱子都有位置。
 	ammoCratePoints: { Vec3 },
+	-- §13.2：撤离区。放在中央街口：距最近人类出生点 70 studs，四条门洞都能到达，至少两路。
+	extractionZone: ExtractionZone,
+	-- §10.1：医院端解药补给槽（西侧走廊）。每局按人数档选 min(cures, #slots) 个。
+	cureSlots: { Vec3 },
 	waypoints: { Waypoint },
 	edges: { Edge },
 }
@@ -193,6 +204,22 @@ local ammoCratePoints: { Vec3 } = {
 	{ x = -22, y = 0, z = 0 },
 }
 
+-- §13.2：撤离区放在中央街口（0,0）。离最近的人类出生点（±70 或 0,±70）70 studs，
+-- 四条门洞轴线都能进入，满足“至少两路可达”；感染区在四角，距撤离区 ≥ 112 studs。
+-- 直径与 §24.4 的 16 studs 一致，读条 2 秒由 RoundStateMachine / BalanceConfig 控制。
+local extractionZone: ExtractionZone = {
+	center = { x = 0, y = 0, z = 0 },
+	diameter = 16,
+}
+
+-- §10.1：医院在西侧。解药补给槽放在外圈西走廊（内表面 -90 到 -41 之间），
+-- 避开墙体、掩体、出生点与枪械补给点；三个槽位间距 30 studs，LARGE 档 3 支解药都有位置。
+local cureSlots: { Vec3 } = {
+	{ x = -81, y = 0, z = -30 },
+	{ x = -81, y = 0, z = 0 },
+	{ x = -81, y = 0, z = 30 },
+}
+
 -- 路点图：外圈环线 + 中央大厅轴线，所有连线都从门洞穿过或沿开阔走廊。
 local waypoints: { Waypoint } = {
 	{ id = "W1", position = { x = -70, y = 0, z = -70 } },
@@ -263,6 +290,11 @@ local Layout: Layout = {
 	infectionZones = freezeList(infectionZones, freezeVec),
 	supplyPoints = freezeList(supplyPoints, freezeVec),
 	ammoCratePoints = freezeList(ammoCratePoints, freezeVec),
+	extractionZone = table.freeze({
+		center = freezeVec(extractionZone.center),
+		diameter = extractionZone.diameter,
+	}),
+	cureSlots = freezeList(cureSlots, freezeVec),
 	waypoints = freezeList(waypoints, function(waypoint)
 		return table.freeze({ id = waypoint.id, position = freezeVec(waypoint.position) })
 	end),

@@ -31,9 +31,13 @@ Constants.Attribute = table.freeze({
 	Combat = "BTC_Combat", -- 丧尸角色上的 ACTIVE / DOWNED / DEAD / STUNNED
 	Health = "BTC_Health", -- 丧尸角色上的 0..1 生命比例
 	RespawnAt = "BTC_RespawnAt", -- DEAD 时的服务端复活时刻（Workspace:GetServerTimeNow）
-	Protected = "BTC_Protected", -- 复活保护公开布尔状态（§9A.3）
+	Protected = "BTC_Protected", -- 复活保护 / 治愈保护公开布尔状态（§9A.3、§10.3）
 	Grabbed = "BTC_Grabbed", -- 人类被擒抱（§9A.6）
 	Grabbing = "BTC_Grabbing", -- 丧尸正在擒抱（§9A.6）
+	-- §6.1：零号源头是公开身份（隔离突破公告），只放布尔标签，不含树关系。
+	Root = "BTC_Root",
+	-- §17.6 QA：开发者泄密审计开关（仅为公开布尔，不含任何对局秘密）。
+	DebugLeakAudit = "BTC_DebugLeakAudit",
 })
 
 -- 客户端通过 RequestAction 只能发送这些意图（§20.4）

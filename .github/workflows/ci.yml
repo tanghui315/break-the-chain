@@ -40,6 +40,7 @@ jobs:
           src/shared/StateLabels.luau
           src/shared/Constants.luau
           src/shared/PublicEventTypes.luau
+          src/shared/InteractTarget.luau
 
       - name: Unit tests (Lune)
         run: lune run tests/lune/run

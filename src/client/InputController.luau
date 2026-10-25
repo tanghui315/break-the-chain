@@ -12,6 +12,7 @@ local Workspace = game:GetService("Workspace")
 
 local BalanceConfig = require(ReplicatedStorage.Shared.BalanceConfig)
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local InteractTarget = require(ReplicatedStorage.Shared.InteractTarget)
 local PublicEventTypes = require(ReplicatedStorage.Shared.PublicEventTypes)
 
 local BITE_ACTION = "BTC_Bite"
@@ -19,6 +20,7 @@ local SPRINT_ACTION = "BTC_Sprint"
 local FIRE_ACTION = "BTC_Fire"
 local RELOAD_ACTION = "BTC_Reload"
 local WEAPON_ACTION = "BTC_Weapon"
+local INTERACT_ACTION = "BTC_Interact"
 
 export type Controller = {
 	getParticipantId: () -> string?,
@@ -33,6 +35,7 @@ export type Controller = {
 	getReserve: () -> number,
 	getTaserCharges: () -> number,
 	isReloading: () -> boolean,
+	getInteractNotice: () -> (string?, number),
 }
 
 local player = Players.LocalPlayer
@@ -47,6 +50,11 @@ local cooldownUntil = 0
 local biteActive = false
 local sprintHeld = false
 local lastFireAtByWeapon: { [string]: number } = {}
+-- Gate A-2b：交互（解药 / 重连）。按住开始读条，释放发送 CancelChannel（服务端累计有效时间）。
+local carryingCure = false
+local interactActive = false
+local interactNoticeText: string? = nil
+local interactNoticeAt = -math.huge
 
 local weapon = "Melee"
 local pistolOwned = false
@@ -66,6 +74,7 @@ local sprintBound = false
 local fireBound = false
 local reloadBound = false
 local weaponBound = false
+local interactBound = false
 
 local InputController = {}
 
@@ -182,6 +191,105 @@ local function findNearestZombie(origin: Vector3, forward: Vector3, maxDistance:
 	end
 
 	return bestId
+end
+
+local function setInteractNotice(text: string)
+	interactNoticeText = text
+	interactNoticeAt = Workspace:GetServerTimeNow()
+end
+
+local function hasCarriedCure(character: Model?): boolean
+	if character == nil then
+		return false
+	end
+	return character:FindFirstChild("BTC_Cure", true) ~= nil
+end
+
+type TargetMode = "CURE" | "RELINK"
+
+-- 只使用公开属性（状态、战斗状态、BTC_Root）挑选交互目标；服务端会重新校验一切。
+local function selectInteractTarget(mode: TargetMode, range: number): InteractTarget.Selection
+	local character = player.Character
+	if character == nil then
+		return { id = nil, distance = nil, rootBlocked = false }
+	end
+	local myRoot = character:FindFirstChild("HumanoidRootPart")
+	if myRoot == nil or not myRoot:IsA("BasePart") then
+		return { id = nil, distance = nil, rootBlocked = false }
+	end
+
+	local candidates: { InteractTarget.Candidate } = {}
+	for _, child in Workspace:GetChildren() do
+		if child:IsA("Model") and child ~= character then
+			local id = child:GetAttribute(Constants.Attribute.ParticipantId)
+			local state = child:GetAttribute(Constants.Attribute.State)
+			local combat = child:GetAttribute(Constants.Attribute.Combat)
+			if type(id) == "string" and state == "INFECTED" then
+				local eligible = if mode == "CURE"
+					then combat == "ACTIVE" or combat == "DOWNED" or combat == "STUNNED"
+					else combat == "ACTIVE" or combat == "STUNNED"
+				if eligible then
+					local root = child:FindFirstChild("HumanoidRootPart")
+					if root ~= nil and root:IsA("BasePart") then
+						table.insert(candidates, {
+							id = id,
+							x = root.Position.X,
+							z = root.Position.Z,
+							eligible = true,
+							isRoot = child:GetAttribute(Constants.Attribute.Root) == true,
+						})
+					end
+				end
+			end
+		end
+	end
+
+	return InteractTarget.selectNearest(
+		candidates,
+		{ x = myRoot.Position.X, z = myRoot.Position.Z },
+		range,
+		mode == "RELINK"
+	)
+end
+
+-- 按住开始读条，释放取消。HUMAN + 解药 → StartCure；UNSTABLE → TryRelink。
+local function interactHandler(
+	_actionName: string,
+	inputState: Enum.UserInputState,
+	_inputObject: InputObject
+): Enum.ContextActionResult
+	if inputState == Enum.UserInputState.Begin then
+		if currentState == "UNSTABLE" then
+			local selection = selectInteractTarget("RELINK", BalanceConfig.Greybox.RelinkRange)
+			if selection.id ~= nil then
+				interactActive = true
+				sendAction({ action = Constants.Action.TryRelink, targetId = selection.id })
+			else
+				setInteractNotice("NO RELINK TARGET")
+			end
+			return Enum.ContextActionResult.Sink
+		elseif currentState == "HUMAN" and carryingCure then
+			local selection = selectInteractTarget("CURE", BalanceConfig.Greybox.CureRange)
+			if selection.id ~= nil then
+				interactActive = true
+				sendAction({ action = Constants.Action.StartCure, targetId = selection.id })
+			elseif selection.rootBlocked then
+				-- §10.2：零号源头不可治愈，提前提示，避免浪费唯一解药。
+				setInteractNotice("SOURCE — cure has no effect")
+			else
+				setInteractNotice("NO CURE TARGET IN RANGE")
+			end
+			return Enum.ContextActionResult.Sink
+		end
+		return Enum.ContextActionResult.Pass
+	elseif inputState == Enum.UserInputState.End or inputState == Enum.UserInputState.Cancel then
+		if interactActive then
+			interactActive = false
+			sendAction({ action = Constants.Action.CancelChannel })
+			return Enum.ContextActionResult.Sink
+		end
+	end
+	return Enum.ContextActionResult.Pass
 end
 
 local function startBite()
@@ -414,6 +522,7 @@ end
 local function updateBindings()
 	local wantHuman = currentState == "HUMAN" and not grabbed
 	local wantZombie = canActAsZombie() or currentState == "INFECTED"
+	local wantInteract = currentState == "UNSTABLE" or (currentState == "HUMAN" and carryingCure and not grabbed)
 
 	if wantZombie and not biteBound then
 		ContextActionService:BindAction(BITE_ACTION, biteHandler, true, Enum.UserInputType.MouseButton1)
@@ -470,6 +579,18 @@ local function updateBindings()
 	elseif (not wantHuman or grabbed) and sprintBound then
 		unbind(SPRINT_ACTION)
 		sprintBound = false
+	end
+
+	-- §10.2 / §11.2：按住交互（PC E / 手机自动按钮）。松开即 CancelChannel，由服务端判定是否保留读条。
+	if wantInteract and not interactBound then
+		ContextActionService:BindAction(INTERACT_ACTION, interactHandler, true, Enum.KeyCode.E)
+		ContextActionService:SetTitle(INTERACT_ACTION, "INTERACT")
+		ContextActionService:SetPosition(INTERACT_ACTION, UDim2.new(1, -170, 1, -140))
+		interactBound = true
+	elseif not wantInteract and interactBound then
+		unbind(INTERACT_ACTION)
+		interactBound = false
+		interactActive = false
 	end
 end
 
@@ -541,10 +662,12 @@ local function bindCharacter(character: Model)
 		grabbingConnection = nil
 	end
 
+	carryingCure = hasCarriedCure(character)
 	setState(character:GetAttribute(Constants.Attribute.State) :: string?)
 	setCombat(character:GetAttribute(Constants.Attribute.Combat) :: string?)
 	setGrabbed(character:GetAttribute(Constants.Attribute.Grabbed) == true)
 	setGrabbing(character:GetAttribute(Constants.Attribute.Grabbing) == true)
+	updateBindings()
 
 	stateConnection = character:GetAttributeChangedSignal(Constants.Attribute.State):Connect(function()
 		setState(character:GetAttribute(Constants.Attribute.State) :: string?)
@@ -620,6 +743,14 @@ local function handlePrivateEvent(eventType: string, payload: any)
 				root.AssemblyLinearVelocity = root.AssemblyLinearVelocity + impulse
 			end
 		end
+	elseif eventType == PublicEventTypes.Private.ChannelProgress then
+		interactActive = true
+	elseif
+		eventType == PublicEventTypes.Private.ChannelCancelled
+		or eventType == PublicEventTypes.Private.Cured
+		or eventType == PublicEventTypes.Private.RelinkSucceeded
+	then
+		interactActive = false
 	end
 end
 
@@ -628,13 +759,16 @@ local function handlePublicEvent(eventType: string, payload: any)
 		biteActive = false
 		cooldownUntil = 0
 		sprintHeld = false
+		interactActive = false
 		lastFireAtByWeapon = {}
 	elseif eventType == PublicEventTypes.Public.RoundPhaseChanged and typeof(payload) == "table" then
 		if payload.phase == "RESULT" then
 			biteActive = false
 			cooldownUntil = 0
+			interactActive = false
 			lastFireAtByWeapon = {}
 		elseif payload.phase == "PREPARE" then
+			interactActive = false
 			weapon = "Melee"
 			pistolOwned = false
 			pistolMagazine = 0
@@ -676,6 +810,21 @@ function InputController.init(): Controller
 		end
 	end)
 
+	-- 解药的“手上小支”是公开模型（BTC_Cure）；客户端只据此显示图标与交互按钮。
+	task.spawn(function()
+		while true do
+			task.wait(0.25)
+			local has = hasCarriedCure(player.Character)
+			if has ~= carryingCure then
+				carryingCure = has
+				if not has then
+					interactActive = false
+				end
+				updateBindings()
+			end
+		end
+	end)
+
 	updateBindings()
 
 	return table.freeze({
@@ -714,6 +863,9 @@ function InputController.init(): Controller
 		end,
 		isReloading = function(): boolean
 			return pistolReloading
+		end,
+		getInteractNotice = function(): (string?, number)
+			return interactNoticeText, interactNoticeAt
 		end,
 	})
 end

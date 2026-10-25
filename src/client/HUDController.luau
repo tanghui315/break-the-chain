@@ -1,7 +1,10 @@
 --!strict
--- 灰盒 HUD（GDB V1.1 §7.5、§9.3、§9.6、§9A）：状态、阶段、存活人数、耐力、丧尸生命、
--- 倒地/复活倒计时、擒抱横幅、武器与弹药、枪声方向提示、事件条与结算横幅。
--- 所有信息来自公开属性、公开广播或本人私有事件；客户端只展示，不参与判定。尺寸用 scale，手机可读。
+-- 灰盒 HUD（GDB V1.1 §7.5、§9.3、§9.6、§9A、§10.3、§11.2、§13.4、§17.2）：
+-- 状态、阶段与倒计时、已撤离 x/y、撤离开启横幅、耐力/丧尸生命、倒地/复活/断联倒计时、
+-- 擒抱横幅、武器与弹药、枪声方向、读条环、携带解药、重连方向箭头、SOURCE/PROTECTED 标签、
+-- 事件条与带原因的结算横幅。
+-- 所有信息来自公开属性、公开广播或本人私有事件；客户端只展示，不参与判定。尺寸用 scale/offset，手机可读。
+-- 不显示全局人类/丧尸人数（§13.4）。
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -19,7 +22,7 @@ local player = Players.LocalPlayer
 
 local stateLabel: TextLabel
 local phaseLabel: TextLabel
-local humansLabel: TextLabel
+local evacuatedLabel: TextLabel
 local staminaFrame: Frame
 local staminaFill: Frame
 local healthFrame: Frame
@@ -31,11 +34,18 @@ local effectLabel: TextLabel
 local gunshotLabel: TextLabel
 local resultLabel: TextLabel
 local feedLabel: TextLabel
+local exitBannerLabel: TextLabel
+local noticeLabel: TextLabel
+local cureLabel: TextLabel
+local relinkArrow: TextLabel
+local channelRing: Frame
+local channelLabel: TextLabel
 
 local inputController: InputController.Controller? = nil
 local phase: string? = nil
 local phaseEndsAt: number? = nil
-local humansLeft = 0
+local extractedCount = 0
+local requiredExtracted = 0
 local lastState: string? = nil
 local resultToken = 0
 local feedToken = 0
@@ -45,6 +55,29 @@ local highlights: { [Model]: Highlight? } = {}
 local lastCombatStates: { [Model]: string? } = {}
 local gunshotPosition: Vector3? = nil
 local gunshotSeenAt = -math.huge
+
+-- Gate A-2b 的私有信息
+local unstableEndsAt: number? = nil
+local relinkHintDirection: Vector3? = nil
+local relinkHintDistance = -1
+local relinkHintAt = -math.huge
+local channelKind: string? = nil
+local channelRatio: number? = nil
+local channelElapsed = 0
+local channelDuration = 0
+local channelUpdatedAt = -math.huge
+local channelSegments: { Frame } = {}
+local hudNoticeText: string? = nil
+local hudNoticeAt = -math.huge
+
+-- 公开标签（客户端本地创建，§17.6）
+type TagEntry = {
+	gui: BillboardGui,
+	label: TextLabel,
+}
+
+local tags: { [Model]: TagEntry } = {}
+local exitBannerUntil = 0
 
 local HUDController = {}
 
@@ -71,6 +104,12 @@ local function stateStyle(state: string): (string, Color3)
 		return text, VisualTokens.Color.Zombie
 	elseif state == "INCUBATING" then
 		return text, VisualTokens.Color.Zombie:Lerp(VisualTokens.Color.Night, 0.55)
+	elseif state == "UNSTABLE" then
+		return text, VisualTokens.Color.Disconnected
+	elseif state == "EXTRACTED" then
+		return text, VisualTokens.Color.Cured
+	elseif state == "SPECTATOR" then
+		return text, VisualTokens.Color.TextSecondary
 	elseif state == "DOWNED" then
 		return text, VisualTokens.Color.Zombie
 	elseif state == "DEAD" then
@@ -95,18 +134,19 @@ local function feed(text: string, color: Color3)
 	end)
 end
 
-local function showResult(winner: string?)
+local function showResult(winner: string?, reason: string?)
 	resultToken += 1
 	local token = resultToken
+	local reasonText = if type(reason) == "string" then `\n{reason}` else ""
 
 	if winner == "HUMANS" then
-		resultLabel.Text = "HUMANS WIN"
+		resultLabel.Text = `HUMANS WIN{reasonText}`
 		resultLabel.TextColor3 = VisualTokens.Color.Human
 	elseif winner == "INFECTED" then
-		resultLabel.Text = "INFECTED WIN"
+		resultLabel.Text = `INFECTED WIN{reasonText}`
 		resultLabel.TextColor3 = VisualTokens.Color.Zombie
 	else
-		resultLabel.Text = "ROUND ENDED"
+		resultLabel.Text = `ROUND ENDED{reasonText}`
 		resultLabel.TextColor3 = VisualTokens.Color.TextSecondary
 	end
 
@@ -118,14 +158,26 @@ local function showResult(winner: string?)
 	end)
 end
 
+local function clearChannel()
+	channelKind = nil
+	channelRatio = nil
+	channelElapsed = 0
+	channelDuration = 0
+	channelUpdatedAt = -math.huge
+	channelRing.Visible = false
+end
+
 local function handlePublicEvent(eventType: string, payload: any)
 	if eventType == PublicEventTypes.Public.RoundPhaseChanged and typeof(payload) == "table" then
 		if type(payload.phase) == "string" then
 			phase = payload.phase
 		end
 		phaseEndsAt = if type(payload.phaseEndsAt) == "number" then payload.phaseEndsAt else nil
-		if type(payload.humansLeft) == "number" then
-			humansLeft = math.max(0, math.floor(payload.humansLeft))
+		if type(payload.extracted) == "number" then
+			extractedCount = math.max(0, math.floor(payload.extracted))
+		end
+		if type(payload.requiredExtracted) == "number" then
+			requiredExtracted = math.max(0, math.floor(payload.requiredExtracted))
 		end
 		if phase == "PREPARE" then
 			resultToken += 1
@@ -134,14 +186,21 @@ local function handlePublicEvent(eventType: string, payload: any)
 			feedLabel.Text = ""
 			gunshotPosition = nil
 			gunshotLabel.Visible = false
+			unstableEndsAt = nil
+			relinkHintDirection = nil
+			relinkHintDistance = -1
+			exitBannerUntil = 0
+			clearChannel()
+		elseif phase == "RESULT" then
+			clearChannel()
 		end
 	elseif eventType == PublicEventTypes.Public.RoundResult and typeof(payload) == "table" then
 		local winner = if type(payload.winner) == "string" then payload.winner else nil
-		showResult(winner)
+		local reason = if type(payload.reason) == "string" then payload.reason else nil
+		showResult(winner, reason)
 	elseif eventType == PublicEventTypes.Public.OutbreakStarted and typeof(payload) == "table" then
-		if type(payload.displayName) == "string" then
-			feed(`{payload.displayName} IS THE SOURCE`, VisualTokens.Color.Zombie)
-		end
+		local count = if type(payload.participantIds) == "table" then #payload.participantIds else 0
+		feed(`OUTBREAK — {count} SOURCE(S)`, VisualTokens.Color.Zombie)
 	elseif eventType == PublicEventTypes.Public.InfectionTurning and typeof(payload) == "table" then
 		if type(payload.displayName) == "string" then
 			feed(`{payload.displayName} IS TURNING`, VisualTokens.Color.Zombie)
@@ -150,12 +209,75 @@ local function handlePublicEvent(eventType: string, payload: any)
 		if type(payload.displayName) == "string" then
 			feed(`{payload.displayName} IS INFECTED`, VisualTokens.Color.Zombie)
 		end
+	elseif eventType == PublicEventTypes.Public.ChainCutNearby and typeof(payload) == "table" then
+		local count = if type(payload.count) == "number" then payload.count else 0
+		feed(`CHAIN BROKEN — {count} DISCONNECTED`, VisualTokens.Color.Disconnected)
+	elseif eventType == PublicEventTypes.Public.ExtractionOpened then
+		exitBannerUntil = Workspace:GetServerTimeNow() + 6
+		feed("EXTRACTION OPEN — REACH THE EXIT", VisualTokens.Color.Exit)
+	elseif eventType == PublicEventTypes.Public.Extracted and typeof(payload) == "table" then
+		if type(payload.extracted) == "number" then
+			extractedCount = math.max(0, math.floor(payload.extracted))
+		end
+		if type(payload.requiredExtracted) == "number" then
+			requiredExtracted = math.max(0, math.floor(payload.requiredExtracted))
+		end
+		if type(payload.displayName) == "string" then
+			feed(
+				string.format("%s EVACUATED (%d/%d)", payload.displayName, extractedCount, requiredExtracted),
+				VisualTokens.Color.Cured
+			)
+		end
 	elseif eventType == PublicEventTypes.Public.GunshotFired and typeof(payload) == "table" then
 		local position = payload.position
 		if typeof(position) == "Vector3" then
 			gunshotPosition = position
 			gunshotSeenAt = Workspace:GetServerTimeNow()
 		end
+	end
+end
+
+-- 私有事件：本人断联倒计时、重连方向、读条进度/取消、治愈与重连结果。
+local function handlePrivateEvent(eventType: string, payload: any)
+	if eventType == PublicEventTypes.Private.YouAreUnstable and typeof(payload) == "table" then
+		if type(payload.unstableEndsAt) == "number" then
+			unstableEndsAt = payload.unstableEndsAt
+		end
+	elseif eventType == PublicEventTypes.Private.RelinkHint and typeof(payload) == "table" then
+		if typeof(payload.direction) == "Vector3" and type(payload.distance) == "number" then
+			relinkHintDirection = payload.direction
+			relinkHintDistance = payload.distance
+			relinkHintAt = Workspace:GetServerTimeNow()
+		end
+	elseif eventType == PublicEventTypes.Private.ChannelProgress and typeof(payload) == "table" then
+		if type(payload.kind) == "string" and type(payload.ratio) == "number" then
+			channelKind = payload.kind
+			channelRatio = math.clamp(payload.ratio, 0, 1)
+			channelElapsed = if type(payload.elapsed) == "number" then payload.elapsed else 0
+			channelDuration = if type(payload.duration) == "number" then payload.duration else 0
+			channelUpdatedAt = Workspace:GetServerTimeNow()
+		end
+	elseif eventType == PublicEventTypes.Private.ChannelCancelled and typeof(payload) == "table" then
+		clearChannel()
+		if payload.reason == "ROOT_IMMUNE" then
+			-- §10.2：即使客户端没能提前识别零号，服务端也会明确告知“普通解药无效”。
+			hudNoticeText = "SOURCE — cure has no effect"
+			hudNoticeAt = Workspace:GetServerTimeNow()
+		end
+	elseif eventType == PublicEventTypes.Private.Cured and typeof(payload) == "table" then
+		clearChannel()
+		if payload.you == "CURER" then
+			feed("CURE COMPLETE", VisualTokens.Color.Cured)
+		elseif payload.you == "CURED" then
+			feed("YOU WERE CURED", VisualTokens.Color.Cured)
+		end
+	elseif eventType == PublicEventTypes.Private.RelinkSucceeded and typeof(payload) == "table" then
+		clearChannel()
+		unstableEndsAt = nil
+		relinkHintDirection = nil
+		relinkHintDistance = -1
+		local count = if type(payload.count) == "number" then payload.count else 0
+		feed(`LINK RESTORED — {count} STABILIZED`, VisualTokens.Color.Disconnected)
 	end
 end
 
@@ -167,36 +289,94 @@ local function displayNameOf(model: Model): string
 	return model.Name
 end
 
--- 可选表现：仅客户端给感染者加轮廓，不写回服务端（§17.6）；死亡隐藏的模型不再加轮廓。
+-- 可选表现：仅客户端给感染者加轮廓（§7 UNSTABLE 用 CHAIN_AMBER），不写回服务端（§17.6）；
+-- 死亡隐藏的模型不再加轮廓。
 local function refreshHighlights()
 	for model, highlight in highlights do
 		local combat = model:GetAttribute(Constants.Attribute.Combat)
+		local state = model:GetAttribute(Constants.Attribute.State)
 		if
 			highlight ~= nil
-			and (model.Parent == nil or model:GetAttribute(Constants.Attribute.State) ~= "INFECTED" or combat == "DEAD")
+			and (model.Parent == nil or (state ~= "INFECTED" and state ~= "UNSTABLE") or combat == "DEAD")
 		then
 			highlight:Destroy()
 			highlights[model] = nil
+		elseif highlight ~= nil then
+			local color = if state == "UNSTABLE" then VisualTokens.Color.Disconnected else VisualTokens.Color.Zombie
+			highlight.FillColor = color
+			highlight.OutlineColor = color
 		end
 	end
 
 	for _, child in Workspace:GetChildren() do
-		if
-			child:IsA("Model")
-			and child:GetAttribute(Constants.Attribute.State) == "INFECTED"
-			and child:GetAttribute(Constants.Attribute.Combat) ~= "DEAD"
-		then
-			if highlights[child] == nil then
-				local highlight = Instance.new("Highlight")
-				highlight.Name = "BTC_InfectedOutline"
-				highlight.Adornee = child
-				highlight.DepthMode = Enum.HighlightDepthMode.Occluded
-				highlight.FillColor = VisualTokens.Color.Zombie
-				highlight.FillTransparency = 0.85
-				highlight.OutlineColor = VisualTokens.Color.Zombie
-				highlight.OutlineTransparency = 0.2
-				highlight.Parent = child
-				highlights[child] = highlight
+		if child:IsA("Model") then
+			local state = child:GetAttribute(Constants.Attribute.State)
+			local combat = child:GetAttribute(Constants.Attribute.Combat)
+			if (state == "INFECTED" or state == "UNSTABLE") and combat ~= "DEAD" then
+				if highlights[child] == nil then
+					local color = if state == "UNSTABLE"
+						then VisualTokens.Color.Disconnected
+						else VisualTokens.Color.Zombie
+					local highlight = Instance.new("Highlight")
+					highlight.Name = "BTC_InfectedOutline"
+					highlight.Adornee = child
+					highlight.DepthMode = Enum.HighlightDepthMode.Occluded
+					highlight.FillColor = color
+					highlight.FillTransparency = 0.85
+					highlight.OutlineColor = color
+					highlight.OutlineTransparency = 0.2
+					highlight.Parent = child
+					highlights[child] = highlight
+				end
+			end
+		end
+	end
+end
+
+-- §6.1 / §10.3：客户端本地 SOURCE / PROTECTED 标签，只读取公开布尔属性。
+local function refreshTags()
+	for model, entry in tags do
+		local root = model:GetAttribute(Constants.Attribute.Root) == true
+		local protected = model:GetAttribute(Constants.Attribute.Protected) == true
+		if model.Parent == nil or (not root and not protected) then
+			entry.gui:Destroy()
+			tags[model] = nil
+		else
+			local text = if root and protected then "SOURCE\nPROTECTED" elseif root then "SOURCE" else "PROTECTED"
+			if entry.label.Text ~= text then
+				entry.label.Text = text
+				entry.label.TextColor3 = if root then VisualTokens.Color.Zombie else VisualTokens.Color.Cured
+			end
+		end
+	end
+
+	for _, child in Workspace:GetChildren() do
+		if child:IsA("Model") then
+			local root = child:GetAttribute(Constants.Attribute.Root) == true
+			local protected = child:GetAttribute(Constants.Attribute.Protected) == true
+			if (root or protected) and tags[child] == nil then
+				local billboard = Instance.new("BillboardGui")
+				billboard.Name = "BTC_PublicTag"
+				billboard.Size = UDim2.fromOffset(180, 52)
+				billboard.StudsOffset = Vector3.new(0, 3.4, 0)
+				billboard.AlwaysOnTop = true
+				billboard.MaxDistance = 90
+				billboard.Parent = child
+
+				local label = Instance.new("TextLabel")
+				label.Name = "Text"
+				label.BackgroundTransparency = 1
+				label.Size = UDim2.fromScale(1, 1)
+				label.Font = Enum.Font.GothamBold
+				label.TextScaled = true
+				label.TextWrapped = true
+				label.TextColor3 = if root then VisualTokens.Color.Zombie else VisualTokens.Color.Cured
+				label.TextStrokeColor3 = VisualTokens.Color.Night
+				label.TextStrokeTransparency = 0.3
+				label.Text = if root and protected then "SOURCE\nPROTECTED" elseif root then "SOURCE" else "PROTECTED"
+				label.Parent = billboard
+
+				tags[child] = { gui = billboard, label = label }
 			end
 		end
 	end
@@ -260,6 +440,9 @@ local function healthRatio(character: Model): number
 	return 0
 end
 
+local refreshRelinkArrow: (string?, number) -> ()
+local refreshChannel: (number) -> ()
+
 local function refreshState()
 	local character = player.Character
 	local state: string? = nil
@@ -287,11 +470,12 @@ local function refreshState()
 	end
 	lastState = state
 
+	local now = Workspace:GetServerTimeNow()
 	local text, color = stateStyle(state)
 	if state == "INFECTED" and combat == "DEAD" then
 		local respawnAt = if character ~= nil then character:GetAttribute(Constants.Attribute.RespawnAt) else nil
 		if type(respawnAt) == "number" then
-			local remaining = math.max(0, respawnAt - Workspace:GetServerTimeNow())
+			local remaining = math.max(0, respawnAt - now)
 			text = string.format("%s %.1fs", StateLabels.DEAD.en, remaining)
 		else
 			text = StateLabels.DEAD.en
@@ -303,6 +487,23 @@ local function refreshState()
 	elseif state == "INFECTED" and combat == "STUNNED" then
 		text = StateLabels.STUNNED.en
 		color = VisualTokens.Color.Disconnected
+	elseif state == "UNSTABLE" then
+		local deadline = unstableEndsAt
+		if deadline ~= nil then
+			text = string.format("%s %.1fs", StateLabels.UNSTABLE.en, math.max(0, deadline - now))
+		else
+			text = StateLabels.UNSTABLE.en
+		end
+		color = VisualTokens.Color.Disconnected
+	elseif state == "HUMAN" and character ~= nil and character:GetAttribute(Constants.Attribute.Protected) == true then
+		text = `{StateLabels.HUMAN.en} · {StateLabels.CURE_IMMUNITY.en}`
+		color = VisualTokens.Color.Cured
+	end
+
+	if state ~= "UNSTABLE" then
+		unstableEndsAt = nil
+		relinkHintDirection = nil
+		relinkHintDistance = -1
 	end
 
 	stateLabel.Text = text
@@ -373,23 +574,119 @@ local function refreshState()
 
 	effectLabel.Visible = grabbed or grabbing
 	effectLabel.Text = if grabbing then StateLabels.GRABBING.en else StateLabels.GRABBED.en
+
+	-- 携带解药：公开的手上小支（BTC_Cure）足以让 HUD 显示图标。
+	local hasCure = state == "HUMAN" and character ~= nil and character:FindFirstChild("BTC_Cure", true) ~= nil
+	cureLabel.Visible = hasCure
+	if hasCure then
+		cureLabel.Text = "CURE — HOLD INTERACT"
+	end
+
+	-- 交互提示（例如瞄准零号时提示普通解药无效）。
+	noticeLabel.Visible = false
+	if hudNoticeText ~= nil and now - hudNoticeAt <= 2.5 then
+		noticeLabel.Text = hudNoticeText
+		noticeLabel.TextColor3 = VisualTokens.Color.Disconnected
+		noticeLabel.Visible = true
+	elseif controller ~= nil then
+		local noticeText, noticeAt = controller.getInteractNotice()
+		if noticeText ~= nil and now - noticeAt <= 2.5 then
+			noticeLabel.Text = noticeText
+			noticeLabel.TextColor3 = VisualTokens.Color.Disconnected
+			noticeLabel.Visible = true
+		end
+	end
+
+	refreshRelinkArrow(state, now)
 	refreshGunshotPing(state)
 end
 
+-- §11.2：断联者只从私有 RelinkHint 得到“方向 + 距离”，客户端据此画屏幕方向箭头。
+function refreshRelinkArrow(state: string?, now: number)
+	local direction = relinkHintDirection
+	local camera = Workspace.CurrentCamera
+	if
+		state ~= "UNSTABLE"
+		or direction == nil
+		or camera == nil
+		or now - relinkHintAt > 1.2
+		or relinkHintDistance < 0
+	then
+		relinkArrow.Visible = false
+		return
+	end
+
+	local localDirection = camera.CFrame:VectorToObjectSpace(direction)
+	local angle = math.deg(math.atan2(localDirection.X, -localDirection.Z))
+	local rad = math.rad(angle)
+	relinkArrow.Rotation = angle
+	relinkArrow.Position = UDim2.fromScale(0.5 + math.sin(rad) * 0.17, 0.5 - math.cos(rad) * 0.17)
+	relinkArrow.Text = "▲"
+	relinkArrow.TextColor3 = VisualTokens.Color.Disconnected
+	relinkArrow.Visible = true
+end
+
+local function channelColor(kind: string?): Color3
+	if kind == "CURE" then
+		return VisualTokens.Color.Cured
+	elseif kind == "EXTRACT" then
+		return VisualTokens.Color.Exit
+	end
+	return VisualTokens.Color.Disconnected
+end
+
+-- 读条环：24 段圆环 + 中央文字（kind / 百分比 / 剩余秒）。
+function refreshChannel(now: number)
+	local ratio = channelRatio
+	local active = channelKind ~= nil and ratio ~= nil and now - channelUpdatedAt <= 0.6 and ratio < 0.999
+	if not active then
+		channelRing.Visible = false
+		return
+	end
+
+	local kind = channelKind or ""
+	local filled = math.floor(math.clamp(ratio :: number, 0, 1) * #channelSegments + 0.5)
+	local color = channelColor(channelKind)
+	for index, segment in channelSegments do
+		if index <= filled then
+			segment.BackgroundColor3 = color
+			segment.BackgroundTransparency = 0
+		else
+			segment.BackgroundColor3 = VisualTokens.Color.SurfaceSlate
+			segment.BackgroundTransparency = 0.45
+		end
+	end
+
+	local remaining = math.max(0, channelDuration - channelElapsed)
+	channelLabel.Text = string.format("%s %d%%\n%.1fs", kind, math.floor((ratio :: number) * 100), remaining)
+	channelLabel.TextColor3 = color
+	channelRing.Visible = true
+end
+
 local function refreshPhase()
+	local now = Workspace:GetServerTimeNow()
 	if phase == nil then
 		phaseLabel.Text = ""
-		humansLabel.Text = ""
+		evacuatedLabel.Text = ""
+		exitBannerLabel.Visible = false
+		channelRing.Visible = false
 		return
 	end
 
 	local suffix = ""
 	if phaseEndsAt ~= nil and phase ~= "RESULT" then
-		local remaining = math.max(0, math.ceil(phaseEndsAt - Workspace:GetServerTimeNow()))
+		local remaining = math.max(0, math.ceil(phaseEndsAt - now))
 		suffix = ` · {remaining}s`
 	end
 	phaseLabel.Text = phase .. suffix
-	humansLabel.Text = string.format("%d HUMANS LEFT", humansLeft)
+	evacuatedLabel.Text = string.format("EVACUATED %d/%d", extractedCount, requiredExtracted)
+
+	exitBannerLabel.Visible = now < exitBannerUntil
+	if exitBannerLabel.Visible then
+		exitBannerLabel.Text = "EXTRACTION OPEN — REACH THE EXIT"
+	end
+
+	refreshChannel(now)
 end
 
 function HUDController.init(controller: InputController.Controller)
@@ -422,12 +719,12 @@ function HUDController.init(controller: InputController.Controller)
 	phaseLabel.Size = UDim2.fromScale(0.4, 0.06)
 	phaseLabel.TextXAlignment = Enum.TextXAlignment.Center
 
-	humansLabel = makeLabel(root, "Humans", 20)
-	humansLabel.AnchorPoint = Vector2.new(1, 0)
-	humansLabel.Position = UDim2.fromScale(0.97, 0.04)
-	humansLabel.Size = UDim2.fromScale(0.3, 0.06)
-	humansLabel.TextXAlignment = Enum.TextXAlignment.Right
-	humansLabel.TextColor3 = VisualTokens.Color.Human
+	evacuatedLabel = makeLabel(root, "Evacuated", 20)
+	evacuatedLabel.AnchorPoint = Vector2.new(1, 0)
+	evacuatedLabel.Position = UDim2.fromScale(0.97, 0.04)
+	evacuatedLabel.Size = UDim2.fromScale(0.32, 0.06)
+	evacuatedLabel.TextXAlignment = Enum.TextXAlignment.Right
+	evacuatedLabel.TextColor3 = VisualTokens.Color.Cured
 
 	staminaFrame = Instance.new("Frame")
 	staminaFrame.Name = "Stamina"
@@ -536,8 +833,84 @@ function HUDController.init(controller: InputController.Controller)
 	resultCorner.CornerRadius = UDim.new(0, 12)
 	resultCorner.Parent = resultLabel
 
-	local publicRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PublicMatchEvent") :: RemoteEvent
+	-- §13.2：撤离开启横幅（公共事件，不含任何秘密信息）。
+	exitBannerLabel = makeLabel(root, "ExitBanner", 24)
+	exitBannerLabel.AnchorPoint = Vector2.new(0.5, 0)
+	exitBannerLabel.Position = UDim2.fromScale(0.5, 0.12)
+	exitBannerLabel.Size = UDim2.fromScale(0.78, 0.065)
+	exitBannerLabel.TextXAlignment = Enum.TextXAlignment.Center
+	exitBannerLabel.TextColor3 = VisualTokens.Color.Exit
+	exitBannerLabel.Visible = false
+
+	-- 交互提示：例如“SOURCE — cure has no effect”。
+	noticeLabel = makeLabel(root, "Notice", 22)
+	noticeLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+	noticeLabel.Position = UDim2.fromScale(0.5, 0.71)
+	noticeLabel.Size = UDim2.fromScale(0.8, 0.06)
+	noticeLabel.TextXAlignment = Enum.TextXAlignment.Center
+	noticeLabel.TextColor3 = VisualTokens.Color.Disconnected
+	noticeLabel.Visible = false
+
+	-- 携带解药图标（公开的手上小支，客户端本地显示）。
+	cureLabel = makeLabel(root, "Cure", 20)
+	cureLabel.AnchorPoint = Vector2.new(0, 1)
+	cureLabel.Position = UDim2.fromScale(0.03, 0.90)
+	cureLabel.Size = UDim2.fromScale(0.38, 0.055)
+	cureLabel.TextXAlignment = Enum.TextXAlignment.Left
+	cureLabel.TextColor3 = VisualTokens.Color.Cured
+	cureLabel.Visible = false
+
+	-- §11.2：断联方向箭头（只用私有 RelinkHint 的方向与距离）。
+	relinkArrow = makeLabel(root, "RelinkArrow", 40)
+	relinkArrow.Text = "▲"
+	relinkArrow.AnchorPoint = Vector2.new(0.5, 0.5)
+	relinkArrow.Size = UDim2.fromOffset(46, 46)
+	relinkArrow.TextColor3 = VisualTokens.Color.Disconnected
+	relinkArrow.TextXAlignment = Enum.TextXAlignment.Center
+	relinkArrow.Visible = false
+
+	-- §10.2 / §11.2 / §13.2：读条环（24 段）+ 中央进度文字。
+	channelRing = Instance.new("Frame")
+	channelRing.Name = "ChannelRing"
+	channelRing.AnchorPoint = Vector2.new(0.5, 0.5)
+	channelRing.Position = UDim2.fromScale(0.5, 0.62)
+	channelRing.Size = UDim2.fromOffset(150, 150)
+	channelRing.BackgroundTransparency = 1
+	channelRing.Visible = false
+	channelRing.Parent = root
+
+	table.clear(channelSegments)
+	for index = 1, 24 do
+		local angle = (index - 1) / 24 * math.pi * 2
+		local segment = Instance.new("Frame")
+		segment.Name = `Segment{index}`
+		segment.AnchorPoint = Vector2.new(0.5, 0.5)
+		segment.Position = UDim2.fromScale(0.5 + math.sin(angle) * 0.40, 0.5 - math.cos(angle) * 0.40)
+		segment.Size = UDim2.fromOffset(8, 24)
+		segment.Rotation = math.deg(angle)
+		segment.BackgroundColor3 = VisualTokens.Color.SurfaceSlate
+		segment.BackgroundTransparency = 0.45
+		segment.BorderSizePixel = 0
+		segment.Parent = channelRing
+
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(1, 0)
+		corner.Parent = segment
+		table.insert(channelSegments, segment)
+	end
+
+	channelLabel = makeLabel(channelRing, "ChannelText", 18)
+	channelLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+	channelLabel.Position = UDim2.fromScale(0.5, 0.5)
+	channelLabel.Size = UDim2.fromOffset(112, 56)
+	channelLabel.TextScaled = true
+	channelLabel.TextXAlignment = Enum.TextXAlignment.Center
+
+	local remotes = ReplicatedStorage:WaitForChild("Remotes")
+	local publicRemote = remotes:WaitForChild("PublicMatchEvent") :: RemoteEvent
+	local privateRemote = remotes:WaitForChild("PrivatePlayerEvent") :: RemoteEvent
 	publicRemote.OnClientEvent:Connect(handlePublicEvent)
+	privateRemote.OnClientEvent:Connect(handlePrivateEvent)
 
 	RunService.RenderStepped:Connect(function(deltaTime: number)
 		updateAccumulator += deltaTime
@@ -549,11 +922,13 @@ function HUDController.init(controller: InputController.Controller)
 		refreshState()
 		refreshPhase()
 		refreshHighlights()
+		refreshTags()
 		refreshCombatFeed()
 	end)
 
 	refreshState()
 	refreshPhase()
+	refreshTags()
 end
 
 return table.freeze(HUDController)

@@ -47,6 +47,9 @@ local zombies: { [string]: Runtime } = {}
 local cleaner: Cleaner.Cleaner? = nil
 local roundStartedAt = 0
 local respawnSeconds = 6
+-- §9A.3：撤离期复活点须距撤离区 ≥ RespawnMinDistanceFromExtraction。
+local extractionPoint: RespawnPicker.Vec3? = nil
+local extractionActive = false
 
 local ZombieCombatService = {}
 
@@ -331,7 +334,8 @@ local function respawn(rt: Runtime, now: number)
 	end
 
 	local humans = humanRootPositions()
-	local pickedIndex = RespawnPicker.pick(respawnConfig, GreyboxLayout.infectionZones, humans, nil, false)
+	local pickedIndex =
+		RespawnPicker.pick(respawnConfig, GreyboxLayout.infectionZones, humans, extractionPoint, extractionActive)
 	local index: number = pickedIndex or 1
 
 	local deadUntilBefore = rt.combat.deadUntil
@@ -396,19 +400,28 @@ function ZombieCombatService.configure(roundCleaner: Cleaner.Cleaner, startedAt:
 		else tierRespawnSeconds
 end
 
+-- §9A.3：撤离阶段把撤离区坐标交给复活选点；撤离未开启时不参与筛选。
+function ZombieCombatService.setExtraction(point: RespawnPicker.Vec3?, activePhase: boolean)
+	extractionPoint = point
+	extractionActive = activePhase
+end
+
 function ZombieCombatService.reset()
 	table.clear(zombies)
 	cleaner = nil
 	roundStartedAt = 0
 	respawnSeconds = 6
+	extractionPoint = nil
+	extractionActive = false
 end
 
+-- 感染身份为 INFECTED 或 UNSTABLE 时都需要战斗记录（断联丧尸仍可被打倒/复活）。
 function ZombieCombatService.createFor(participantId: string, isRoot: boolean, now: number)
 	if zombies[participantId] ~= nil then
 		return
 	end
 	local record = PlayerStateService.get(participantId)
-	if record == nil or record.state ~= "INFECTED" then
+	if record == nil or (record.state ~= "INFECTED" and record.state ~= "UNSTABLE") then
 		return
 	end
 	local rt = newRuntime(participantId, isRoot, now)
@@ -417,10 +430,15 @@ function ZombieCombatService.createFor(participantId: string, isRoot: boolean, n
 	applyCombatSpeed(rt, now)
 end
 
-function ZombieCombatService.remove(participantId: string)
+-- restore 用于“治愈 / 断联到期”把死亡隐藏的角色交还给人形状态；
+-- 玩家离场时角色本就会被销毁，保留默认 false 即可。
+function ZombieCombatService.remove(participantId: string, restore: boolean?)
 	local rt = zombies[participantId]
 	if rt == nil then
 		return
+	end
+	if restore == true then
+		restoreCharacter(rt)
 	end
 	local participant = ParticipantService.getById(participantId)
 	if participant ~= nil and participant.character ~= nil then

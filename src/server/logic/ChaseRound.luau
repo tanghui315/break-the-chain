@@ -2,6 +2,9 @@
 -- Gate A0 纯追逐回合状态机（GDB V1.1 §5、§7.3、§19.5、§24.4）：WAITING → PREPARE → CONTEST → RESULT。
 -- A0 没有治愈、感染树、扫描或撤离；只保留人类/丧尸、尸变过渡与两个胜负条件。
 -- 纯逻辑：全部状态是普通表，时间由参数传入，种子选择由调用方注入以便测试确定性。
+--
+-- Gate A-2b 起 RoundService 改由 RoundStateMachine 驱动（完整感染森林 / 解药 / 断联 / 重连 / 撤离）；
+-- 本模块保留作为 A0 的对照基线与回归测试对象，不再被运行中的回合循环 require。
 
 export type Config = {
 	IncubationSeconds: number,

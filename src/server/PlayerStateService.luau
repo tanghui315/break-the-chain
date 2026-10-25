@@ -20,8 +20,10 @@ export type Record = {
 	biteCooldownUntil: number?,
 	windupStartedAt: number?,
 	windupConsumed: boolean,
-	-- A0 没有解药，保留字段是为了直接复用 BiteRules 的目标豁免逻辑
+	-- §10.3：治愈/断联恢复后的 7 秒防再感染，直接复用 BiteRules 的目标豁免逻辑
 	curedImmuneUntil: number?,
+	-- §6.1：零号源头是公开标签；记录在服务端，只以布尔属性发布。
+	isRoot: boolean,
 	stamina: Stamina.Stamina,
 	-- 客户端按住冲刺时持续保留意图：耐力耗尽后恢复过起步阈值会自动续跑。
 	sprintWanted: boolean,
@@ -58,6 +60,7 @@ function PlayerStateService.createFor(participant: ParticipantService.Participan
 		windupStartedAt = nil,
 		windupConsumed = true,
 		curedImmuneUntil = nil,
+		isRoot = false,
 		stamina = Stamina.new(staminaConfig),
 		sprintWanted = false,
 		movementLocked = false,
@@ -99,6 +102,9 @@ function PlayerStateService.baseSpeedFor(record: Record): number
 		return BalanceConfig.Greybox.ZombieRunSpeed
 	elseif record.state == "UNSTABLE" then
 		return BalanceConfig.Greybox.UnstableRunSpeed
+	elseif record.state == "EXTRACTED" or record.state == "SPECTATOR" then
+		-- 已撤离/观战不在战场：原地冻结，避免离线角色继续参与追逐。
+		return 0
 	end
 	return BalanceConfig.Greybox.HumanWalkSpeed
 end
@@ -129,7 +135,7 @@ end
 
 -- 倒地只能爬行、电击/死亡不能移动，因此这些战斗状态也禁用跳跃；擒抱锁优先。
 local function applyJumpLock(record: Record, humanoid: Humanoid)
-	local locked = record.movementLocked
+	local locked = record.movementLocked or record.state == "EXTRACTED" or record.state == "SPECTATOR"
 	if not locked then
 		local combatSpeed = record.combatSpeed
 		locked = combatSpeed ~= nil and combatSpeed <= BalanceConfig.DownedMoveSpeed
@@ -147,11 +153,44 @@ function PlayerStateService.applyVisual(record: Record)
 	local character = participant.character
 	PlayerStateService.prepareCharacter(character)
 	character:SetAttribute(Constants.Attribute.State, record.state)
+	character:SetAttribute(Constants.Attribute.Root, if record.isRoot then true else nil)
+	if record.state == "EXTRACTED" or record.state == "SPECTATOR" then
+		character:SetAttribute(Constants.Attribute.Protected, nil)
+	end
 
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if humanoid ~= nil then
 		applyJumpLock(record, humanoid)
 		humanoid.WalkSpeed = PlayerStateService.speedFor(record)
+	end
+	PlayerStateService.publishProtection(record, workspace:GetServerTimeNow())
+end
+
+-- §10.3：治愈保护是 HUMAN 上的公开定时效果；只由人类路径写入，
+-- 丧尸的 BTC_Protected 仍归 ZombieCombatService（复活保护）。
+function PlayerStateService.publishProtection(record: Record, now: number)
+	if record.state ~= "HUMAN" then
+		return
+	end
+	local participant = ParticipantService.getById(record.id)
+	if participant == nil or participant.character == nil then
+		return
+	end
+	local untilAt = record.curedImmuneUntil
+	local protected = untilAt ~= nil and now < untilAt
+	participant.character:SetAttribute(Constants.Attribute.Protected, if protected then true else nil)
+end
+
+-- §6.1：零号源头标签（公开）。非根参与者清除标签。
+function PlayerStateService.setRoot(id: string, isRoot: boolean)
+	local record = records[id]
+	if record == nil or record.isRoot == isRoot then
+		return
+	end
+	record.isRoot = isRoot
+	local participant = ParticipantService.getById(id)
+	if participant ~= nil and participant.character ~= nil then
+		participant.character:SetAttribute(Constants.Attribute.Root, if isRoot then true else nil)
 	end
 end
 
