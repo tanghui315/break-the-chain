@@ -42,7 +42,9 @@ local BalanceConfig = {
 	ReconnectHoldSeconds = 1.0,
 	CureChannelSeconds = 2.0,
 	CuredImmunitySeconds = 7,
+	CureRetryCooldownSeconds = 1.5, -- §10.1：失败/取消的治愈尝试后的短冷却，防止刷交互
 	ExtractionWindowSeconds = 90,
+	ContainmentStableSeconds = 3, -- §13.3：遏制胜利前的短暂稳定性复核窗口
 
 	-- 战斗（§9）
 	BiteWindupSeconds = 0.35,
