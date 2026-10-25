@@ -70,6 +70,7 @@ local RELINK_HINT_INTERVAL = 0.5
 local TREE_SNAPSHOT_INTERVAL = 30
 local INVARIANT_CHECK_INTERVAL = 1
 local BOT_CURE_SEARCH_RADIUS = 30
+local DEBUG_FORCE_BOT_FILL_ATTRIBUTE = "BTC_DebugForceBotFill"
 
 -- BalanceConfig 是 sealed 表，纯模块的 Config 只声明自己用到的字段；在调用边界收窄一次。
 local roundConfig: RoundStateMachine.Config = BalanceConfig :: any
@@ -1221,7 +1222,15 @@ local function startRound(snapshot: { Player })
 	BotService.reset()
 	RateLimiter.reset(rateLimiter)
 
-	local plan = MatchConfig.planRound(matchConfig, #snapshot)
+	-- §20.9 DebugForceBotFill：仅 Studio 读取 ServerStorage 上的属性，把参与者补到该数量（例如 8 人做 D8 玩法验证）。
+	local forceBotFill: number? = nil
+	if RunService:IsStudio() then
+		local value = game:GetService("ServerStorage"):GetAttribute(DEBUG_FORCE_BOT_FILL_ATTRIBUTE)
+		if type(value) == "number" and value > 0 then
+			forceBotFill = math.clamp(math.floor(value), 1, 24)
+		end
+	end
+	local plan = MatchConfig.planRound(matchConfig, #snapshot, forceBotFill)
 	if plan == nil then
 		return
 	end
@@ -1561,6 +1570,12 @@ local function installDevHook()
 				pivotCharacter(participant.character, extractionCenter())
 			end
 			return "ok"
+		end,
+		botFill = function(_rt, _now, count)
+			-- 下一局生效；传 0 关闭。
+			local value = tonumber(count) or 0
+			ServerStorage:SetAttribute(DEBUG_FORCE_BOT_FILL_ATTRIBUTE, if value > 0 then value else nil)
+			return `ok next round fill={value}`
 		end,
 		roundLeft = function(rt, now, seconds)
 			rt.round.roundEndsAt = now + (tonumber(seconds) or 0)
