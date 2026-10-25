@@ -20,6 +20,11 @@ Roblox 多人感染对抗游戏。设计文档见 `docs/`，以 `断链_BREAK_TH
 
    在 Studio 的 Rojo 插件里点 Connect。运行游戏后，输出窗口应出现 `[BreakTheChain] server boot ...`。
 
+## 当前进度
+
+Gate A（规则闭环）的代码已完成：追逐与扑咬（A0）、轻射击对抗层（A0.5，GDB §9A）、感染树、治愈、8 秒断联与重连、撤离与胜负。
+下一步是 Studio 试玩验收，按 [docs/Gate_A_试玩验收清单.md](docs/Gate_A_试玩验收清单.md) 逐项确认；通过之前不开始 Gate B。
+
 ## 常用命令
 
 | 用途 | 命令 |
