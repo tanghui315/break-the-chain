@@ -1446,6 +1446,140 @@ local function installDevLeakToggle()
 	Players.PlayerAdded:Connect(hook)
 end
 
+-- Studio 试玩 QA：服务端专用 BindableFunction（ServerStorage 不复制给客户端），用来强制制造
+-- Bot 局里很少自然出现的治愈 / 断联 / 重连 / 撤离场景。正式服不创建。
+local function installDevHook()
+	if not RunService:IsStudio() then
+		return
+	end
+	local ServerStorage = game:GetService("ServerStorage")
+	local hook = Instance.new("BindableFunction")
+	hook.Name = "BTC_DevHook"
+
+	local function freeze(participantId: string, on: boolean)
+		local root = rootOf(participantId)
+		if root ~= nil then
+			root.Anchored = on
+		end
+	end
+
+	local function placeNear(participantId: string, anchorId: string)
+		local participant = ParticipantService.getById(participantId)
+		local anchor = rootPositionOf(anchorId)
+		if participant ~= nil and participant.character ~= nil and anchor ~= nil then
+			pivotCharacter(participant.character, anchor + Vector3.new(2, 0, 0))
+		end
+	end
+
+	local commands: { [string]: (rt: Runtime, now: number, a: any, b: any) -> any } = {
+		dump = function(rt, now)
+			local lines = {
+				`phase={rt.round.phase} t={string.format("%.1f", now - rt.round.startedAt)}`
+					.. ` roundLeft={string.format("%.1f", rt.round.roundEndsAt - now)} exitOpen={rt.exitOpen}`
+					.. ` extracted={rt.round.extractedCount}/{requiredExtracted(rt)}`,
+			}
+			for _, id in InfectionGraph.participantIds(rt.round.graph) do
+				local state = InfectionGraph.getState(rt.round.graph, id)
+				local participant = ParticipantService.getById(id)
+				if state ~= nil then
+					table.insert(
+						lines,
+						`{id} {if participant then participant.kind else "?"} {state.state}`
+							.. `{if state.isRoot then " ROOT" else ""} combat={ZombieCombatService.stateOf(id) or "-"}`
+							.. ` cure={CureInventory.heldBy(rt.round.cures, id) or "-"}`
+							.. `{if state.unstableEndsAt
+								then ` unstableLeft={string.format("%.1f", state.unstableEndsAt - now)}`
+								else ""}`
+					)
+				end
+			end
+			for _, itemId in rt.round.cures.order do
+				local item = rt.round.cures.items[itemId]
+				table.insert(lines, `cure {itemId} {item.state} {item.carrierId or ""}`)
+			end
+			return table.concat(lines, "\n")
+		end,
+		giveCure = function(rt, _now, participantId)
+			for _, itemId in rt.round.cures.order do
+				local item = rt.round.cures.items[itemId]
+				if item.state == "SUPPLY" or item.state == "DROPPED" then
+					local ok, reason = CureInventory.pickup(rt.round.cures, itemId, participantId)
+					CureService.syncVisuals()
+					return `{ok} {reason or itemId}`
+				end
+			end
+			-- 灰盒每局只有 1 支：QA 时把已消耗的放回补给再发。
+			for _, itemId in rt.round.cures.order do
+				local item = rt.round.cures.items[itemId]
+				if item.state == "CONSUMED" then
+					item.state = "SUPPLY"
+					local ok, reason = CureInventory.pickup(rt.round.cures, itemId, participantId)
+					CureService.syncVisuals()
+					return `{ok} {reason or itemId} (recycled)`
+				end
+			end
+			return "false NO_FREE_CURE"
+		end,
+		freeze = function(_rt, _now, participantId, on)
+			freeze(participantId, on == true)
+			return "ok"
+		end,
+		placeNear = function(_rt, _now, participantId, anchorId)
+			placeNear(participantId, anchorId)
+			return "ok"
+		end,
+		cure = function(rt, now, actorId, targetId)
+			placeNear(actorId, targetId)
+			freeze(actorId, true)
+			freeze(targetId, true)
+			return tostring(requestCureFor(rt, actorId, targetId, now, true))
+		end,
+		relink = function(rt, now, unstableId, targetId)
+			placeNear(unstableId, targetId)
+			freeze(unstableId, true)
+			freeze(targetId, true)
+			return tostring(requestRelinkFor(rt, unstableId, targetId, now, true))
+		end,
+		infect = function(rt, now, attackerId, targetId)
+			local result = RoundStateMachine.onBite(rt.round, attackerId, targetId, now)
+			if result.ok then
+				applyEvents(rt, result.events, now)
+			end
+			return `{result.ok} {result.reason or "OK"}`
+		end,
+		damage = function(_rt, now, participantId, amount)
+			local result = ZombieCombatService.applyDamage(participantId, tonumber(amount) or 100, now)
+			return if result ~= nil then `{result.reason} downed={result.downed} hp={result.health}` else "no zombie"
+		end,
+		stun = function(_rt, now, participantId)
+			local ok, reason = ZombieCombatService.applyStun(participantId, now)
+			return `{ok} {reason}`
+		end,
+		toExit = function(_rt, _now, participantId)
+			local participant = ParticipantService.getById(participantId)
+			if participant ~= nil and participant.character ~= nil then
+				pivotCharacter(participant.character, extractionCenter())
+			end
+			return "ok"
+		end,
+		roundLeft = function(rt, now, seconds)
+			rt.round.roundEndsAt = now + (tonumber(seconds) or 0)
+			return "ok"
+		end,
+	}
+
+	hook.OnInvoke = function(name: string, a: any, b: any): any
+		local rt = runtime
+		local command = commands[name]
+		if rt == nil or command == nil then
+			return `no runtime or unknown command {name}`
+		end
+		local ok, result = pcall(command, rt, serverNow(), a, b)
+		return if ok then result else `error: {tostring(result)}`
+	end
+	hook.Parent = ServerStorage
+end
+
 local function mainLoop()
 	while true do
 		local snapshot = ParticipantService.onlinePlayers()
@@ -1505,6 +1639,7 @@ function RoundService.start()
 	Players.PlayerRemoving:Connect(handlePlayerRemoving)
 	Players.PlayerAdded:Connect(handlePlayerAdded)
 	installDevLeakToggle()
+	installDevHook()
 
 	task.spawn(mainLoop)
 	print(`[BreakTheChain] RoundService started; {BalanceConfig.Version}`)

@@ -497,7 +497,9 @@ local function buildTargets(shooterId: string, now: number): { Weapons.TargetInp
 			local isZombie = state == "INFECTED" or state == "UNSTABLE"
 			-- 死亡中的丧尸已经从战场隐藏，不能让它的旧根位置吸收子弹（§9A.3）。
 			local hiddenDead = isZombie and ZombieCombatService.isDead(otherId)
-			if not hiddenDead then
+			-- §9A.6：被擒抱的人类贴在丧尸身上，不能挡住队友的解救射击/近战，否则救援几乎必然变成 FRIENDLY_FIRE。
+			local grabbedHuman = not isZombie and GrabService.isGrabbed(otherId)
+			if not hiddenDead and not grabbedHuman then
 				local targetActive = if isZombie then ZombieCombatService.canBeHit(otherId, now) else false
 				local history = otherRecord.history
 				table.insert(targets, {
