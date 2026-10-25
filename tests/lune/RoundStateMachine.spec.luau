@@ -216,6 +216,24 @@ local function pickUp(round: RoundStateMachine.Round, itemId: string, participan
 end
 
 describe("RoundStateMachine", function()
+	it("does not award a containment win while still in PREPARE", function()
+		-- 回归：Studio 实测准备期 3.5 秒即以 CONTAINMENT 结束（准备期无感染者被当成遏制）。
+		local round = newRound({ "U:1", "U:2", "U:3", "U:4" }, {
+			config = makeConfig({ PrepareSeconds = 20, ContainmentStableSeconds = 3 }),
+		})
+		local _hookState, hooks = makeHooks()
+		local log: { any } = {}
+		for t = 0, 19.5, 0.5 do
+			tickInto(log, round, t, hooks)
+		end
+		expect(round.phase).toBe(Phase.PREPARE)
+		expect(countType(log, EventName.RoundResult)).toBe(0)
+
+		tickInto(log, round, 20, hooks)
+		expect(round.phase).toBe(Phase.OUTBREAK)
+		expect(countType(log, EventName.RoundResult)).toBe(0)
+	end)
+
 	it("runs a scripted round through every phase: cure a hub, one relink, one expiry, then extraction", function()
 		local ids = { "U:1", "U:2", "U:3", "U:4", "U:5" }
 		local round = newRound(ids)

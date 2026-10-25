@@ -903,6 +903,13 @@ function RoundStateMachine.tick(round: Round, now: number, hooks: Hooks): TickRe
 		return { events = events }
 	end
 
+	-- PREPARE 期间还没有零号，“无感染者”是常态而不是遏制；不做读条与胜负判定，
+	-- 否则遏制复核会在准备期内直接判人类胜。
+	if round.phase == PHASE_PREPARE then
+		round.containedSince = nil
+		return { events = events }
+	end
+
 	advancePhases(round, at, events)
 	autoStartExtraction(round, at, hooks)
 
