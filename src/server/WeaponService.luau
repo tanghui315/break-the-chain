@@ -872,9 +872,28 @@ function WeaponService.hasPistol(participantId: string): boolean
 	return entry ~= nil and entry.inventory.pistol.owned
 end
 
+-- Bot 医疗兵决策用：手枪是否还有火力（弹匣或备弹）。空枪不该让 Bot 站定“射击”。
+function WeaponService.pistolUsable(participantId: string): boolean
+	local entry = entries[participantId]
+	if entry == nil or not entry.inventory.pistol.owned then
+		return false
+	end
+	local pistol = entry.inventory.pistol
+	return pistol.magazine > 0 or pistol.reserve > 0
+end
+
 function WeaponService.hasTaser(participantId: string): boolean
 	local entry = entries[participantId]
 	return entry ~= nil and entry.inventory.taser.owned
+end
+
+-- 电击枪剩余次数；0 表示没有电击枪或次数已耗尽。
+function WeaponService.taserCharges(participantId: string): number
+	local entry = entries[participantId]
+	if entry == nil or not entry.inventory.taser.owned then
+		return 0
+	end
+	return entry.inventory.taser.magazine
 end
 
 function WeaponService.hasGun(participantId: string): boolean

@@ -10,6 +10,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local BalanceConfig = require(ReplicatedStorage.Shared.BalanceConfig)
 local GreyboxLayout = require(script.Parent.world.GreyboxLayout)
+local WaypointRoute = require(script.Parent.logic.WaypointRoute)
 local CombatService = require(script.Parent.CombatService)
 local GrabService = require(script.Parent.GrabService)
 local MovementService = require(script.Parent.MovementService)
@@ -27,8 +28,10 @@ type BotAI = {
 	wanderAt: number,
 	shootTargetId: string?,
 	shootReadyAt: number,
-	-- 撤离期沿路点图走向撤离区（EXTRACTION 阶段才使用）。
-	exitWaypointId: string?,
+	-- 通用路点导航（navigateTo）：目标坐标用于目标移动后重新选路，navHopId 是当前要到达的下一跳。
+	navGoalX: number?,
+	navGoalZ: number?,
+	navHopId: string?,
 }
 
 -- Gate A-2b：Bot 只通过这组回调接触回合规则（解药 / 重连 / 撤离），
@@ -47,42 +50,37 @@ export type Director = {
 local THINK_INTERVAL = 0.25
 local WANDER_INTERVAL = 3
 local THREAT_RADIUS = 40
+-- §10.2：持有解药的 Bot 只躲 15 studs 内的其他丧尸，否则永远到不了治愈目标。
+local MEDIC_THREAT_RADIUS = 15
+-- 治愈目标本身不拉仇恨；只有 ACTIVE 且贴到 6 studs 内、自己又没有远程手段时才逃。
+local MEDIC_SAFE_DISTANCE = 6
 local ZOMBIE_SIGHT_RADIUS = 80
 local PICKUP_PATH_RADIUS = 80
 local SHOOT_REACTION_SECONDS = 0.4
 local MAP_COLLISION_GROUP = "MapStatic"
+-- 到达路点跳点的判定半径；目标移动超过这个距离才重新选路。
+local NAV_ARRIVE_DISTANCE = 5
+local NAV_GOAL_CHANGE_DISTANCE = 2
 
 local ais: { [string]: BotAI } = {}
 local spawnCursor = 0
 
 local waypointById: { [string]: GreyboxLayout.Waypoint } = {}
 local adjacency: { [string]: { string } } = {}
+local routeWaypoints: { WaypointRoute.Waypoint } = {}
+local routeEdges: { WaypointRoute.Edge } = {}
 for _, waypoint in GreyboxLayout.waypoints do
 	waypointById[waypoint.id] = waypoint
 	adjacency[waypoint.id] = {}
+	table.insert(routeWaypoints, {
+		id = waypoint.id,
+		position = { x = waypoint.position.x, z = waypoint.position.z },
+	})
 end
 for _, edge in GreyboxLayout.edges do
 	table.insert(adjacency[edge.a], edge.b)
 	table.insert(adjacency[edge.b], edge.a)
-end
-
--- 撤离路径：从中心路点 W9（撤离区中心）反向 BFS，得到每个路点朝出口的下一跳。
--- Bot 沿门洞/走廊逐跳移动，避免直线 MoveTo 卡在内墙拐角。
-local EXIT_WAYPOINT = "W9"
-local exitNextHop: { [string]: string } = { [EXIT_WAYPOINT] = EXIT_WAYPOINT }
-do
-	local queue: { string } = { EXIT_WAYPOINT }
-	local head = 1
-	while head <= #queue do
-		local current = queue[head]
-		head += 1
-		for _, neighbor in adjacency[current] do
-			if exitNextHop[neighbor] == nil then
-				exitNextHop[neighbor] = current
-				table.insert(queue, neighbor)
-			end
-		end
-	end
+	table.insert(routeEdges, { a = edge.a, b = edge.b })
 end
 
 local BotService = {}
@@ -249,7 +247,9 @@ function BotService.respawn(participant: ParticipantService.Participant): Model?
 		ai.nextThinkAt = 0
 		ai.shootTargetId = nil
 		ai.shootReadyAt = 0
-		ai.exitWaypointId = nil
+		ai.navGoalX = nil
+		ai.navGoalZ = nil
+		ai.navHopId = nil
 	end
 	return model
 end
@@ -275,18 +275,14 @@ function BotService.destroyAll()
 end
 
 local function nearestWaypoint(position: Vector3): string?
-	local bestId: string? = nil
-	local bestDistance = math.huge
-	for id, waypoint in waypointById do
-		local dx = waypoint.position.x - position.X
-		local dz = waypoint.position.z - position.Z
-		local distance = dx * dx + dz * dz
-		if distance < bestDistance then
-			bestDistance = distance
-			bestId = id
-		end
-	end
-	return bestId
+	return WaypointRoute.nearest(routeWaypoints, { x = position.X, z = position.Z })
+end
+
+-- 丢弃当前寻路状态。逃离/游荡会离开原路线，下次 navigateTo 必须重新选路。
+local function clearNav(ai: BotAI)
+	ai.navGoalX = nil
+	ai.navGoalZ = nil
+	ai.navHopId = nil
 end
 
 local function moveToWaypoint(participant: ParticipantService.Participant, ai: BotAI, waypointId: string)
@@ -295,40 +291,94 @@ local function moveToWaypoint(participant: ParticipantService.Participant, ai: B
 	if waypoint == nil or humanoid == nil then
 		return
 	end
+	clearNav(ai)
 	ai.waypointId = waypointId
 	humanoid:MoveTo(Vector3.new(waypoint.position.x, waypoint.position.y, waypoint.position.z))
 end
 
--- 沿路点图逐跳走向撤离区中心（W9），每到达一跳附近再前进，避免直线穿越内墙。
-local function moveTowardExit(ai: BotAI, origin: Vector3, humanoid: Humanoid)
-	local storedId = ai.exitWaypointId
-	local targetId: string
-	if storedId ~= nil then
-		targetId = storedId
-	else
-		local current = nearestWaypoint(origin)
-		local nextId: string? = nil
-		if current ~= nil then
-			nextId = exitNextHop[current]
-		end
-		targetId = nextId or EXIT_WAYPOINT
-		ai.exitWaypointId = targetId
+local function horizontalDistance(a: Vector3, b: Vector3): number
+	local dx = a.X - b.X
+	local dz = a.Z - b.Z
+	return math.sqrt(dx * dx + dz * dz)
+end
+
+-- 通用寻路移动：直线视线畅通就直接走；被内墙挡住时沿路点图逐跳绕行。
+-- 目标每移动超过 NAV_GOAL_CHANGE_DISTANCE 就重新选路；到达一跳附近再推进下一跳。
+-- 调用方负责设置冲刺意图；这里只管 MoveTo。
+local function navigateTo(participant: ParticipantService.Participant, ai: BotAI, goal: Vector3)
+	local root = rootOf(participant)
+	local humanoid = humanoidOf(participant)
+	if root == nil or humanoid == nil then
+		return
+	end
+	local origin = root.Position
+
+	-- 只检测 MapStatic：角色、补给箱不挡路，真正需要绕开的只有墙和柱子。
+	-- 水平射线：拾取点在地面高度，斜向下的射线会擦到地板被误判为遮挡。
+	if hasLineOfSight(participant.character, nil, origin, Vector3.new(goal.X, origin.Y, goal.Z)) then
+		clearNav(ai)
+		humanoid:MoveTo(goal)
+		return
 	end
 
-	local waypoint = waypointById[targetId]
-	if waypoint ~= nil then
-		local dx = waypoint.position.x - origin.X
-		local dz = waypoint.position.z - origin.Z
-		if math.sqrt(dx * dx + dz * dz) <= 5 then
-			local hop: string? = exitNextHop[targetId]
-			targetId = hop or EXIT_WAYPOINT
-			ai.exitWaypointId = targetId
-			waypoint = waypointById[targetId]
+	local goalX = ai.navGoalX
+	local goalZ = ai.navGoalZ
+	local retarget = goalX == nil
+		or goalZ == nil
+		or horizontalDistance(Vector3.new(goalX, 0, goalZ), Vector3.new(goal.X, 0, goal.Z))
+			> NAV_GOAL_CHANGE_DISTANCE
+	if retarget then
+		ai.navGoalX = goal.X
+		ai.navGoalZ = goal.Z
+		ai.navHopId = nil
+	end
+
+	local startId = nearestWaypoint(origin)
+	local goalId = WaypointRoute.nearest(routeWaypoints, { x = goal.X, z = goal.Z })
+	if startId == nil or goalId == nil or startId == goalId then
+		-- 同一路点区域或图外：退化为直线，交给 Humanoid 处理。
+		clearNav(ai)
+		humanoid:MoveTo(goal)
+		return
+	end
+
+	-- 到达当前跳点后推进：最后一跳到达时直接走目标，其余情况清空后重新选下一跳。
+	local hopId = ai.navHopId
+	if hopId ~= nil then
+		local hop = waypointById[hopId]
+		local arrived = hop ~= nil
+			and horizontalDistance(
+					Vector3.new(hop.position.x, 0, hop.position.z),
+					Vector3.new(origin.X, 0, origin.Z)
+				)
+				<= NAV_ARRIVE_DISTANCE
+		if hop == nil or arrived then
+			ai.navHopId = nil
+			if hopId == goalId then
+				clearNav(ai)
+				humanoid:MoveTo(goal)
+				return
+			end
 		end
 	end
-	if waypoint ~= nil then
-		humanoid:MoveTo(Vector3.new(waypoint.position.x, waypoint.position.y, waypoint.position.z))
+
+	local nextHopId: string? = ai.navHopId
+	if nextHopId == nil then
+		nextHopId = WaypointRoute.nextHop(routeWaypoints, routeEdges, startId, goalId)
+		ai.navHopId = nextHopId
 	end
+	if nextHopId == nil then
+		humanoid:MoveTo(goal)
+		return
+	end
+
+	local hop = waypointById[nextHopId]
+	if hop == nil then
+		ai.navHopId = nil
+		humanoid:MoveTo(goal)
+		return
+	end
+	humanoid:MoveTo(Vector3.new(hop.position.x, hop.position.y, hop.position.z))
 end
 
 -- 丧尸：找人 → 追到判定距离内 → 起前摇 → 前摇结束冲刺并提交（与真人同一 tryBite）。
@@ -495,9 +545,38 @@ local function stepUnstable(id: string, participant: ParticipantService.Particip
 	end
 end
 
+type CureTarget = {
+	id: string,
+	participant: ParticipantService.Participant,
+	root: BasePart,
+	-- ZombieCombatService.publicStateOf：ACTIVE / DOWNED / DEAD / STUNNED，属于公开战斗状态。
+	publicState: string?,
+}
+
+-- 解药目标由服务端 Director 选择（公开信息：感染状态 + 是否零号）；Bot 不读感染树拓扑。
+-- 只保留战斗状态与位置给行为层用。
+local function findCureTarget(id: string, activeDirector: Director, now: number): CureTarget?
+	local targetId = activeDirector.nearestCureTarget(id)
+	if targetId == nil then
+		return nil
+	end
+	local target = ParticipantService.getById(targetId)
+	local targetRoot = if target ~= nil then rootOf(target) else nil
+	if target == nil or targetRoot == nil then
+		return nil
+	end
+	return {
+		id = targetId,
+		participant = target,
+		root = targetRoot,
+		publicState = ZombieCombatService.publicStateOf(targetId, now),
+	}
+end
+
 -- 人类 / 尸变中 Bot：有枪打最近的可见 ACTIVE 丧尸，近战打断前摇/擒抱；有丧尸就逃离，
 -- 没枪且附近没有丧尸时走向附近补给点；否则在路点间慢慢游荡（§9A.4、§9A.5）。
--- Gate A-2b：撤离期直奔出口；持有解药时走向可治愈目标并通过 requestCure 读条。
+-- Gate A-2b：撤离期直奔出口；持有解药时进入医疗兵状态：ACTIVE 目标先用枪/电击枪放倒，
+-- DOWNED / STUNNED 目标靠近后 requestCure 读条。治愈目标本身不算威胁。
 local function stepHuman(id: string, participant: ParticipantService.Participant, ai: BotAI, now: number)
 	local root = rootOf(participant)
 	local humanoid = humanoidOf(participant)
@@ -509,6 +588,7 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 	if GrabService.isGrabbed(id) then
 		MovementService.setSprintIntent(id, false)
 		humanoid:Move(Vector3.zero, false)
+		clearNav(ai)
 		return
 	end
 
@@ -528,9 +608,19 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 	-- §13.2：撤离期人类 Bot 直奔撤离区；进入判定区后由 RoundStateMachine 自动起读条。
 	if humanActions and activeDirector ~= nil and activeDirector.extractionOpen() then
 		MovementService.setSprintIntent(id, true)
-		moveTowardExit(ai, origin, humanoid)
+		local center = GreyboxLayout.extractionZone.center
+		navigateTo(participant, ai, Vector3.new(center.x, GreyboxLayout.floorTopY, center.z))
 		return
 	end
+
+	-- §10.2：持有解药时先选目标。目标本身要从威胁扫描里排除，否则 Bot 会从自己的病人身边逃走。
+	local hasCure = humanActions and activeDirector ~= nil and activeDirector.hasCure(id)
+	local cureTarget: CureTarget? = nil
+	if hasCure and activeDirector ~= nil then
+		cureTarget = findCureTarget(id, activeDirector, now)
+	end
+	local cureTargetId: string? = if cureTarget ~= nil then cureTarget.id else nil
+	local threatRadius = if hasCure then MEDIC_THREAT_RADIUS else THREAT_RADIUS
 
 	local threatPosition: Vector3? = nil
 	local nearbyZombie = false
@@ -541,6 +631,7 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 	local pistolRange = BalanceConfig.Weapons.Pistol.Range
 	local meleeRange = BalanceConfig.Weapons.Melee.Range
 	local hasPistol = humanActions and WeaponService.hasPistol(id)
+	local taserCharges = if humanActions then WeaponService.taserCharges(id) else 0
 
 	for otherId, other in ParticipantService.all() do
 		if otherId ~= id and PlayerStateService.stateFor(otherId) == "INFECTED" then
@@ -550,7 +641,7 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 				local horizontal = Vector3.new(delta.X, 0, delta.Z)
 				local distance = horizontal.Magnitude
 				local active = isActiveZombie(otherId, now)
-				if active and distance <= THREAT_RADIUS then
+				if active and distance <= threatRadius and otherId ~= cureTargetId then
 					nearbyZombie = true
 					if threatPosition == nil then
 						threatPosition = otherRoot.Position
@@ -583,6 +674,23 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 		end
 	end
 
+	-- §10.2：医疗兵优先打自己的 ACTIVE 目标，而不是被最近的丧尸抢走准星。
+	if cureTarget ~= nil and cureTarget.publicState == "ACTIVE" and hasPistol and head ~= nil then
+		local distance = horizontalDistance(origin, cureTarget.root.Position)
+		if
+			isHittableZombie(cureTarget.id, now)
+			and distance <= pistolRange
+			and hasLineOfSight(
+				participant.character,
+				cureTarget.participant.character,
+				head.Position,
+				cureTarget.root.Position
+			)
+		then
+			shootTarget = cureTarget.participant
+		end
+	end
+
 	-- 近战优先：前摇或擒抱中的丧尸值得立刻打断，哪怕 Bot 手上还有手枪。
 	if meleeTarget ~= nil and head ~= nil then
 		local zombieRoot = rootOf(meleeTarget)
@@ -606,26 +714,41 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 		ai.shootTargetId = nil
 	end
 
-	-- §10.2：持有解药的 Bot 在没有即时威胁时走向可治愈目标，进入半径后走 requestCure（服务端读条）。
-	if humanActions and activeDirector ~= nil and activeDirector.hasCure(id) and threatPosition == nil then
-		local cureTargetId = activeDirector.nearestCureTarget(id)
-		if cureTargetId ~= nil then
-			local cureTarget = ParticipantService.getById(cureTargetId)
-			local cureRoot = if cureTarget ~= nil then rootOf(cureTarget) else nil
-			if cureRoot ~= nil then
-				local delta = cureRoot.Position - root.Position
-				local horizontal = Vector3.new(delta.X, 0, delta.Z)
-				MovementService.setSprintIntent(id, false)
-				if horizontal.Magnitude <= BalanceConfig.Greybox.CureRange * 0.9 then
-					if not activeDirector.isChanneling(id) then
-						activeDirector.requestCure(id, cureTargetId)
-					end
-					humanoid:Move(Vector3.zero, false)
-				else
-					humanoid:MoveTo(cureRoot.Position)
-				end
-				return
-			end
+	-- §10.2：没有手枪时用电击枪放倒 ACTIVE 目标，电击后自然会进入 STUNNED 分支靠近治愈。
+	if
+		cureTarget ~= nil
+		and cureTarget.publicState == "ACTIVE"
+		and humanActions
+		and taserCharges > 0
+		and not WeaponService.pistolUsable(id)
+		and head ~= nil
+	then
+		local distance = horizontalDistance(origin, cureTarget.root.Position)
+		if
+			distance <= BalanceConfig.Weapons.Taser.Range
+			and hasLineOfSight(
+				participant.character,
+				cureTarget.participant.character,
+				head.Position,
+				cureTarget.root.Position
+			)
+		then
+			WeaponService.fireBot(id, "Taser", head.Position, cureTarget.root.Position - head.Position, now)
+		end
+	end
+
+	-- 读条期间站住不动；目标走出 CureRange 时由 RoundStateMachine 取消，不在本 tick 追着跑。
+	if hasCure and activeDirector ~= nil and activeDirector.isChanneling(id) then
+		MovementService.setSprintIntent(id, false)
+		humanoid:Move(Vector3.zero, false)
+		return
+	end
+
+	-- 目标仍是 ACTIVE 且贴脸时，没有可用手枪/电击次数才逃；有远程手段就继续压制。
+	if cureTarget ~= nil and cureTarget.publicState == "ACTIVE" then
+		local armed = WeaponService.pistolUsable(id) or taserCharges > 0
+		if not armed and horizontalDistance(origin, cureTarget.root.Position) < MEDIC_SAFE_DISTANCE then
+			threatPosition = cureTarget.root.Position
 		end
 	end
 
@@ -662,13 +785,50 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 		return
 	end
 
+	-- §10.2 医疗兵：倒地/电击目标直接靠近读条；ACTIVE 目标在手枪射程内先站定射击，
+	-- 否则（例如只有电击枪或射程外）继续接近。目标失效时落到下面的常规行为。
+	if hasCure and activeDirector ~= nil and cureTarget ~= nil then
+		MovementService.setSprintIntent(id, false)
+		local distance = horizontalDistance(origin, cureTarget.root.Position)
+		local state = cureTarget.publicState
+		if state == "DOWNED" or state == "STUNNED" then
+			if distance <= BalanceConfig.Greybox.CureRange * 0.9 then
+				if not activeDirector.isChanneling(id) then
+					activeDirector.requestCure(id, cureTarget.id)
+				end
+				humanoid:Move(Vector3.zero, false)
+			else
+				navigateTo(participant, ai, cureTarget.root.Position)
+			end
+			return
+		elseif state == "ACTIVE" then
+			local shootReady = WeaponService.pistolUsable(id)
+				and isHittableZombie(cureTarget.id, now)
+				and head ~= nil
+				and distance <= pistolRange
+				and hasLineOfSight(
+					participant.character,
+					cureTarget.participant.character,
+					head.Position,
+					cureTarget.root.Position
+				)
+			if shootReady then
+				-- 上方射击块已经开火（含 SHOOT_REACTION_SECONDS）；这里站定，不再贴合送咬。
+				humanoid:Move(Vector3.zero, false)
+			else
+				navigateTo(participant, ai, cureTarget.root.Position)
+			end
+			return
+		end
+	end
+
 	MovementService.setSprintIntent(id, false)
 	-- §10.1：没有解药时优先去医院端补给槽；拾取由 CureService 的服务端距离判定完成。
-	if humanActions and not nearbyZombie and activeDirector ~= nil and not activeDirector.hasCure(id) then
+	if humanActions and not nearbyZombie and activeDirector ~= nil and not hasCure then
 		local curePickup = activeDirector.nearestCurePickup(origin, PICKUP_PATH_RADIUS)
 		if curePickup ~= nil then
 			ai.waypointId = nil
-			humanoid:MoveTo(Vector3.new(curePickup.X, GreyboxLayout.floorTopY, curePickup.Z))
+			navigateTo(participant, ai, Vector3.new(curePickup.X, GreyboxLayout.floorTopY, curePickup.Z))
 			return
 		end
 	end
@@ -677,7 +837,7 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 		local pickup = WeaponService.nearestPickupPosition(origin, PICKUP_PATH_RADIUS)
 		if pickup ~= nil then
 			ai.waypointId = nil
-			humanoid:MoveTo(Vector3.new(pickup.X, GreyboxLayout.floorTopY, pickup.Z))
+			navigateTo(participant, ai, Vector3.new(pickup.X, GreyboxLayout.floorTopY, pickup.Z))
 			return
 		end
 	end

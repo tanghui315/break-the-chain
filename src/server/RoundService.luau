@@ -69,7 +69,8 @@ local MAX_ACTION_BYTES = 64
 local RELINK_HINT_INTERVAL = 0.5
 local TREE_SNAPSHOT_INTERVAL = 30
 local INVARIANT_CHECK_INTERVAL = 1
-local BOT_CURE_SEARCH_RADIUS = 30
+-- §10.2：Bot 医疗兵可以看到几乎整张灰盒地图（SMALL 约 180×180），30 studs 太小导致守着解药不救。
+local BOT_CURE_SEARCH_RADIUS = 150
 local DEBUG_FORCE_BOT_FILL_ATTRIBUTE = "BTC_DebugForceBotFill"
 
 -- BalanceConfig 是 sealed 表，纯模块的 Config 只声明自己用到的字段；在调用边界收窄一次。
@@ -315,28 +316,44 @@ local function nearestRelinkTargetFor(rt: Runtime, participantId: string, range:
 	return InteractTarget.selectNearest(relinkCandidates(rt), { x = origin.X, z = origin.Z }, range, true)
 end
 
+-- §10.2 医疗兵选目标：优先已倒地/被电击的感染者（bot 能安全靠近读条），
+-- 其次才是最近的 ACTIVE 感染者；零号永远不进入候选（普通解药无效，且 isRoot 是公开信息）。
+-- 只使用公开战斗状态（publicStateOf）与位置，不向 Bot 暴露感染树拓扑。
 local function nearestCureTargetFor(rt: Runtime, participantId: string): string?
 	local origin = rootPositionOf(participantId)
 	if origin == nil then
 		return nil
 	end
+	local now = serverNow()
+	local originXZ = { x = origin.X, z = origin.Z }
 	local candidates: { InteractTarget.Candidate } = {}
+	local priorityCandidates: { InteractTarget.Candidate } = {}
 	for _, id in InfectionGraph.participantIds(rt.round.graph) do
 		local state = InfectionGraph.getState(rt.round.graph, id)
 		local position = rootPositionOf(id)
 		if state ~= nil and position ~= nil then
-			table.insert(candidates, {
+			local eligible = state.state == "INFECTED" and not state.isRoot and canCureTarget(id)
+			local candidate: InteractTarget.Candidate = {
 				id = id,
 				x = position.X,
 				z = position.Z,
-				eligible = state.state == "INFECTED" and not state.isRoot and canCureTarget(id),
+				eligible = eligible,
 				isRoot = state.isRoot,
-			})
+			}
+			table.insert(candidates, candidate)
+			if eligible then
+				local publicState = ZombieCombatService.publicStateOf(id, now)
+				if publicState == "DOWNED" or publicState == "STUNNED" then
+					table.insert(priorityCandidates, candidate)
+				end
+			end
 		end
 	end
-	local selection =
-		InteractTarget.selectNearest(candidates, { x = origin.X, z = origin.Z }, BOT_CURE_SEARCH_RADIUS, false)
-	return selection.id
+	local priority = InteractTarget.selectNearest(priorityCandidates, originXZ, BOT_CURE_SEARCH_RADIUS, false)
+	if priority.id ~= nil then
+		return priority.id
+	end
+	return InteractTarget.selectNearest(candidates, originXZ, BOT_CURE_SEARCH_RADIUS, false).id
 end
 
 -- ---------------------------------------------------------------------------
