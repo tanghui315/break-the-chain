@@ -33,6 +33,8 @@ type BotAI = {
 	navGoalX: number?,
 	navGoalZ: number?,
 	navHopId: string?,
+	-- 仅 Studio 自动驾驶真人：上次接管的角色，换角色（重生）时重置导航。
+	drivenCharacter: Model?,
 }
 
 -- Gate A-2b：Bot 只通过这组回调接触回合规则（解药 / 重连 / 撤离），
@@ -256,6 +258,42 @@ function BotService.createBots(count: number, roundId: string, spawnOffset: numb
 end
 
 -- 掉出地图 / 死亡后用相同 ParticipantId 重建角色，阵营与耐力记录保持不变（§19.5）。
+-- 仅 Studio 调试（BTC_DebugAutopilotPlayers）：让真人角色也由 Bot AI 驾驶，Bot 压测时 8 人都有行为。
+function BotService.adoptPlayer(participant: ParticipantService.Participant)
+	if participant.kind ~= "Player" or ais[participant.id] ~= nil then
+		return
+	end
+	ais[participant.id] = {
+		botIndex = 0,
+		waypointId = nil,
+		nextThinkAt = 0,
+		biteTargetId = nil,
+		windupEndsAt = nil,
+		wanderAt = 0,
+		shootTargetId = nil,
+		shootReadyAt = 0,
+	}
+end
+
+local function syncDrivenPlayer(participant: ParticipantService.Participant, ai: BotAI): boolean
+	local character = participant.character
+	if character == nil or character.Parent == nil then
+		return false
+	end
+	if ai.drivenCharacter ~= character then
+		ai.drivenCharacter = character
+		ai.waypointId = nil
+		ai.biteTargetId = nil
+		ai.windupEndsAt = nil
+		ai.nextThinkAt = 0
+		ai.shootTargetId = nil
+		ai.navGoalX = nil
+		ai.navGoalZ = nil
+		ai.navHopId = nil
+	end
+	return true
+end
+
 function BotService.respawn(participant: ParticipantService.Participant): Model?
 	local ai = ais[participant.id]
 	local botIndex = if ai ~= nil then ai.botIndex else 1
@@ -921,10 +959,10 @@ end
 
 function BotService.step(now: number)
 	for id, participant in ParticipantService.all() do
-		if participant.kind == "Bot" then
-			local ai = ais[id]
+		local ai = ais[id]
+		if ai ~= nil and (participant.kind == "Bot" or syncDrivenPlayer(participant, ai)) then
 			local record = PlayerStateService.get(id)
-			if ai ~= nil and record ~= nil then
+			if record ~= nil then
 				if record.state == "INFECTED" then
 					stepZombie(id, participant, ai, now)
 				elseif record.state == "UNSTABLE" then

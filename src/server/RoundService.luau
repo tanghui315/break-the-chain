@@ -88,6 +88,8 @@ local DEBUG_FORCE_BOT_FILL_ATTRIBUTE = "BTC_DebugForceBotFill"
 local DEBUG_MAP_VARIANT_ATTRIBUTE = "BTC_DebugMapVariant"
 -- Studio 专用：打开母巢指挥（§6.4 EXP-09），用于 A/B 对比。
 local DEBUG_HIVE_ATTRIBUTE = "BTC_DebugHive"
+-- 仅 Studio：真人角色交给 Bot AI 驾驶（Bot 压测时避免 Studio 玩家站桩当活靶 / 不会用技能的零号）。
+local DEBUG_AUTOPILOT_ATTRIBUTE = "BTC_DebugAutopilotPlayers"
 
 -- BalanceConfig 是 sealed 表，纯模块的 Config 只声明自己用到的字段；在调用边界收窄一次。
 local roundConfig: RoundStateMachine.Config = BalanceConfig :: any
@@ -1496,6 +1498,14 @@ local function startRound(snapshot: { Player })
 		return
 	end
 
+	local autopilotCount = 0
+	if RunService:IsStudio() and game:GetService("ServerStorage"):GetAttribute(DEBUG_AUTOPILOT_ATTRIBUTE) == true then
+		for _, participant in participants do
+			BotService.adoptPlayer(participant)
+			autopilotCount += 1
+		end
+	end
+
 	-- Bot 从真人占用的出生点之后开始排，避免开局叠模型。
 	for _, bot in BotService.createBots(plan.botCount, roundId, #participants) do
 		table.insert(participants, bot)
@@ -1594,6 +1604,7 @@ local function startRound(snapshot: { Player })
 		roundDuration = plan.tier.roundSeconds,
 		mapVariant = mapVariant,
 		hive = rt.hiveEnabled,
+		autopilot = autopilotCount,
 		-- roundId/serverTimestamp/buildVersion 由 telemetry() 自动补齐
 	})
 	if plan.botCount > 0 then
