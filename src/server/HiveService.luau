@@ -384,6 +384,20 @@ function HiveService.requestRally(rootId: string, now: number, notify: boolean):
 	return started, startReason
 end
 
+-- 仅 Studio 开发钩子使用：清空零号的标记 / 集结冷却，便于强制场景复测。
+function HiveService.debugResetCooldowns(rootId: string): boolean
+	local current = state
+	if current == nil then
+		return false
+	end
+	local root = current.roots[rootId]
+	if root ~= nil then
+		root.markReadyAt = -math.huge
+		root.rallyReadyAt = -math.huge
+	end
+	return true
+end
+
 function HiveService.isChanneling(rootId: string): boolean
 	local current = state
 	return current ~= nil and Hive.channelOf(current, rootId) ~= nil

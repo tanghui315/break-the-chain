@@ -1866,6 +1866,9 @@ local function installDevHook()
 			local ok, reason = HiveService.requestMark(rootId, now, true)
 			return `{ok} {reason}`
 		end,
+		hiveReset = function(_rt, _now, rootId)
+			return tostring(HiveService.debugResetCooldowns(rootId))
+		end,
 		rally = function(_rt, now, rootId)
 			local ok, reason = HiveService.requestRally(rootId, now, true)
 			return `{ok} {reason}`
