@@ -36,6 +36,8 @@ Constants.Attribute = table.freeze({
 	Grabbing = "BTC_Grabbing", -- 丧尸正在擒抱（§9A.6）
 	-- §6.1：零号源头是公开身份（隔离突破公告），只放布尔标签，不含树关系。
 	Root = "BTC_Root",
+	-- §6.4 EXP-09：本局是否开启母巢指挥（Workspace 上的公开实验开关，不含任何对局秘密）。
+	HiveEnabled = "BTC_HiveEnabled",
 	-- §17.6 QA：开发者泄密审计开关（仅为公开布尔，不含任何对局秘密）。
 	DebugLeakAudit = "BTC_DebugLeakAudit",
 })
@@ -54,6 +56,9 @@ Constants.Action = table.freeze({
 	StartScan = "StartScan",
 	StartExtract = "StartExtract",
 	CancelChannel = "CancelChannel",
+	-- §6.4 EXP-09：零号的母巢指挥（服务端校验身份与条件）。
+	RootMark = "RootMark",
+	RootRally = "RootRally",
 })
 
 return table.freeze(Constants)

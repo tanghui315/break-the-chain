@@ -44,6 +44,10 @@ PublicEventTypes.Private = table.freeze({
 	Cured = "Cured",
 	RelinkSucceeded = "RelinkSucceeded",
 	BranchWarning = "BranchWarning",
+	-- §6.4 EXP-09：源头标记只发给本树稳定丧尸（含零号）；被标记者另收提示；零号收到能力结果与冷却。
+	HiveMark = "HiveMark",
+	YouAreMarked = "YouAreMarked",
+	HiveAbilityResult = "HiveAbilityResult",
 })
 
 return table.freeze(PublicEventTypes)

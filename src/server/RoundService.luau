@@ -33,6 +33,7 @@ local BotService = require(script.Parent.BotService)
 local CombatService = require(script.Parent.CombatService)
 local CureService = require(script.Parent.CureService)
 local GrabService = require(script.Parent.GrabService)
+local HiveService = require(script.Parent.HiveService)
 local MovementService = require(script.Parent.MovementService)
 local ParticipantService = require(script.Parent.ParticipantService)
 local PlayerStateService = require(script.Parent.PlayerStateService)
@@ -58,6 +59,7 @@ type Runtime = {
 	lastRelinkHintAt: number,
 	lastTreeSnapshotAt: number,
 	-- 遭遇采样（地图可玩性对比）：每名人类最近一次“被丧尸近距离看到”的时间。
+	hiveEnabled: boolean,
 	lastEncounterSampleAt: number,
 	lastEngagedAt: { [string]: number },
 	firstEncounterLogged: boolean,
@@ -84,6 +86,8 @@ local BOT_CURE_SEARCH_RADIUS = 150
 local DEBUG_FORCE_BOT_FILL_ATTRIBUTE = "BTC_DebugForceBotFill"
 -- Studio 专用：强制地图变体（"SMALL" / "MEDIUM"），用于同人数下对比两张图。
 local DEBUG_MAP_VARIANT_ATTRIBUTE = "BTC_DebugMapVariant"
+-- Studio 专用：打开母巢指挥（§6.4 EXP-09），用于 A/B 对比。
+local DEBUG_HIVE_ATTRIBUTE = "BTC_DebugHive"
 
 -- BalanceConfig 是 sealed 表，纯模块的 Config 只声明自己用到的字段；在调用边界收窄一次。
 local roundConfig: RoundStateMachine.Config = BalanceConfig :: any
@@ -913,6 +917,24 @@ local function makeDirector(rt: Runtime): BotService.Director
 		extractionOpen = function(): boolean
 			return rt.round.phase == Phase.EXTRACTION
 		end,
+		hiveEnabled = function(): boolean
+			return HiveService.enabled()
+		end,
+		isRoot = function(participantId: string): boolean
+			return HiveService.isRoot(participantId)
+		end,
+		requestRootMark = function(participantId: string): boolean
+			return (HiveService.requestMark(participantId, serverNow(), false))
+		end,
+		requestRally = function(participantId: string): boolean
+			return (HiveService.requestRally(participantId, serverNow(), false))
+		end,
+		isRallyChanneling = function(participantId: string): boolean
+			return HiveService.isChanneling(participantId)
+		end,
+		markedTargetFor = function(participantId: string): string?
+			return HiveService.markedTargetFor(participantId, serverNow())
+		end,
 	}
 end
 
@@ -1328,6 +1350,7 @@ local function tickRuntime(rt: Runtime): boolean
 		for _, grab in GrabService.tick(now) do
 			local result = RoundStateMachine.onBite(rt.round, grab.zombieId, grab.humanId, now)
 			if result.ok then
+				HiveService.onBite(grab.humanId, now)
 				telemetry("bite_committed", {
 					attacker = grab.zombieId,
 					target = grab.humanId,
@@ -1338,6 +1361,7 @@ local function tickRuntime(rt: Runtime): boolean
 		end
 
 		ZombieCombatService.step(now)
+		HiveService.step(now)
 		MovementService.step(now)
 		WeaponService.step(now)
 		CureService.step(now)
@@ -1385,6 +1409,7 @@ local function cleanupRound()
 
 	GrabService.reset()
 	WeaponService.reset()
+	HiveService.reset()
 	ZombieCombatService.reset()
 	CureService.reset()
 	BotService.setDirector(nil)
@@ -1423,6 +1448,7 @@ end
 local function startRound(snapshot: { Player })
 	GrabService.reset()
 	WeaponService.reset()
+	HiveService.reset()
 	ZombieCombatService.reset()
 	CureService.reset()
 	ParticipantService.reset()
@@ -1524,6 +1550,7 @@ local function startRound(snapshot: { Player })
 		firstInfectionLogged = false,
 		lastRelinkHintAt = -math.huge,
 		lastTreeSnapshotAt = startedAt,
+		hiveEnabled = false,
 		lastEncounterSampleAt = startedAt,
 		lastEngagedAt = {},
 		firstEncounterLogged = false,
@@ -1537,6 +1564,25 @@ local function startRound(snapshot: { Player })
 	WeaponService.configureRound(rt.cleaner)
 	ZombieCombatService.configure(rt.cleaner, startedAt, (plan.tier :: any).zombieRespawnSeconds)
 	CureService.configure(rt.cleaner, round)
+	-- §6.4 EXP-09：母巢指挥默认关闭；Studio 下可用 BTC_DebugHive 打开做 A/B。
+	local hiveEnabled = BalanceConfig.HiveAbilitiesEnabled
+	if RunService:IsStudio() and game:GetService("ServerStorage"):GetAttribute(DEBUG_HIVE_ATTRIBUTE) == true then
+		hiveEnabled = true
+	end
+	rt.hiveEnabled = hiveEnabled
+	Workspace:SetAttribute(Constants.Attribute.HiveEnabled, if hiveEnabled then true else nil)
+	HiveService.begin({
+		graph = round.graph,
+		startedAt = startedAt,
+		telemetry = telemetry,
+		firePrivate = firePrivate,
+		inActivePhase = function(): boolean
+			return round.phase == Phase.CONTEST or round.phase == Phase.EXTRACTION
+		end,
+		activeExtractionCenter = function(): Vector3?
+			return if round.phase == Phase.EXTRACTION then extractionCenter() else nil
+		end,
+	}, rt.cleaner, hiveEnabled)
 	BotService.setDirector(makeDirector(rt))
 
 	telemetry("round_started", {
@@ -1547,6 +1593,7 @@ local function startRound(snapshot: { Player })
 		seedCount = plan.tier.seedCount,
 		roundDuration = plan.tier.roundSeconds,
 		mapVariant = mapVariant,
+		hive = rt.hiveEnabled,
 		-- roundId/serverTimestamp/buildVersion 由 telemetry() 自动补齐
 	})
 	if plan.botCount > 0 then
@@ -1651,6 +1698,10 @@ local function handleAction(player: Player, payload: any)
 			return
 		end
 		requestRelinkFor(rt, participant.id, targetId, now, true)
+	elseif action == Constants.Action.RootMark then
+		HiveService.requestMark(participant.id, now, true)
+	elseif action == Constants.Action.RootRally then
+		HiveService.requestRally(participant.id, now, true)
 	elseif action == Constants.Action.CancelChannel then
 		local result = RoundStateMachine.cancelChannel(rt.round, participant.id, now)
 		if result.ok then
@@ -1713,7 +1764,8 @@ local function installDevHook()
 			local lines = {
 				`phase={rt.round.phase} t={string.format("%.1f", now - rt.round.startedAt)}`
 					.. ` roundLeft={string.format("%.1f", rt.round.roundEndsAt - now)} exitOpen={rt.exitOpen}`
-					.. ` extracted={rt.round.extractedCount}/{requiredExtracted(rt)} map={ActiveMap.getVariant()}`,
+					.. ` extracted={rt.round.extractedCount}/{requiredExtracted(rt)} map={ActiveMap.getVariant()}`
+					.. ` hive={rt.hiveEnabled}`,
 			}
 			for _, id in InfectionGraph.participantIds(rt.round.graph) do
 				local state = InfectionGraph.getState(rt.round.graph, id)
@@ -1804,6 +1856,19 @@ local function installDevHook()
 			local value = tonumber(count) or 0
 			ServerStorage:SetAttribute(DEBUG_FORCE_BOT_FILL_ATTRIBUTE, if value > 0 then value else nil)
 			return `ok next round fill={value}`
+		end,
+		hive = function(_rt, _now, on)
+			-- 下一局生效：true 打开母巢指挥（EXP-09 B 组），其他值关闭。
+			ServerStorage:SetAttribute(DEBUG_HIVE_ATTRIBUTE, if on == true then true else nil)
+			return `ok next round hive={on == true}`
+		end,
+		rootMark = function(_rt, now, rootId)
+			local ok, reason = HiveService.requestMark(rootId, now, true)
+			return `{ok} {reason}`
+		end,
+		rally = function(_rt, now, rootId)
+			local ok, reason = HiveService.requestRally(rootId, now, true)
+			return `{ok} {reason}`
 		end,
 		mapVariant = function(_rt, _now, value)
 			-- 下一局生效；传 "SMALL" / "MEDIUM"，其他值清除覆盖（回到按人数档选图）。
@@ -1905,6 +1970,7 @@ function RoundService.start()
 	publicEvent = remotes:WaitForChild("PublicMatchEvent") :: RemoteEvent
 	privateEvent = remotes:WaitForChild("PrivatePlayerEvent") :: RemoteEvent
 
+	ZombieCombatService.setRespawnOverride(HiveService.respawnPositionFor)
 	CombatService.setBiteHandler(function(attackerId: string, targetId: string, biteNow: number)
 		local rt = runtime
 		if rt == nil then
@@ -1915,6 +1981,7 @@ function RoundService.start()
 		if result.infect then
 			local bite = RoundStateMachine.onBite(rt.round, attackerId, targetId, biteNow)
 			if bite.ok then
+				HiveService.onBite(targetId, biteNow)
 				telemetry("bite_committed", {
 					attacker = attackerId,
 					target = targetId,

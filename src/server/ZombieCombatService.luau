@@ -50,6 +50,8 @@ local respawnSeconds = 6
 -- §9A.3：撤离期复活点须距撤离区 ≥ RespawnMinDistanceFromExtraction。
 local extractionPoint: RespawnPicker.Vec3? = nil
 local extractionActive = false
+-- §6.4 EXP-09：母巢信标存在时由 HiveService 给出复活位置；返回 nil 走感染区。
+local respawnOverride: ((participantId: string, now: number) -> Vector3?)? = nil
 
 local ZombieCombatService = {}
 
@@ -350,7 +352,8 @@ local function respawn(rt: Runtime, now: number)
 		return
 	end
 
-	participant.character:PivotTo(spawnCFrameFor(index))
+	local override = if respawnOverride ~= nil then respawnOverride(rt.id, now) else nil
+	participant.character:PivotTo(if override ~= nil then CFrame.new(override) else spawnCFrameFor(index))
 	restoreCharacter(rt)
 
 	local root = rootOf(participant)
@@ -371,7 +374,7 @@ local function respawn(rt: Runtime, now: number)
 	print(
 		string.format(
 			"[Telemetry] zombie_respawned spawnZone=%s nearestHumanDistance=%s deadSeconds=%s lastZombieCapApplied=%s isUnstable=%s",
-			tostring(index),
+			if override ~= nil then "HIVE" else tostring(index),
 			if nearest == math.huge then "inf" else string.format("%.1f", nearest),
 			string.format("%.1f", deadSeconds),
 			tostring(capsApplied),
@@ -409,6 +412,10 @@ function ZombieCombatService.configure(roundCleaner: Cleaner.Cleaner, startedAt:
 end
 
 -- §9A.3：撤离阶段把撤离区坐标交给复活选点；撤离未开启时不参与筛选。
+function ZombieCombatService.setRespawnOverride(fn: ((participantId: string, now: number) -> Vector3?)?)
+	respawnOverride = fn
+end
+
 function ZombieCombatService.setExtraction(point: RespawnPicker.Vec3?, activePhase: boolean)
 	extractionPoint = point
 	extractionActive = activePhase

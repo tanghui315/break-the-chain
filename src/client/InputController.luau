@@ -21,6 +21,8 @@ local FIRE_ACTION = "BTC_Fire"
 local RELOAD_ACTION = "BTC_Reload"
 local WEAPON_ACTION = "BTC_Weapon"
 local INTERACT_ACTION = "BTC_Interact"
+local HIVE_MARK_ACTION = "BTC_HiveMark"
+local HIVE_RALLY_ACTION = "BTC_HiveRally"
 
 export type Controller = {
 	getParticipantId: () -> string?,
@@ -68,6 +70,9 @@ local stateConnection: RBXScriptConnection? = nil
 local combatConnection: RBXScriptConnection? = nil
 local grabbedConnection: RBXScriptConnection? = nil
 local grabbingConnection: RBXScriptConnection? = nil
+local rootConnection: RBXScriptConnection? = nil
+-- §6.4 EXP-09：本人是否零号（公开 BTC_Root 属性），决定是否绑定母巢按键。
+local isRootSelf = false
 
 local biteBound = false
 local sprintBound = false
@@ -75,6 +80,7 @@ local fireBound = false
 local reloadBound = false
 local weaponBound = false
 local interactBound = false
+local hiveBound = false
 
 local InputController = {}
 
@@ -515,6 +521,23 @@ local function sprintHandler(
 	return Enum.ContextActionResult.Pass
 end
 
+-- §6.4 EXP-09：Q 源头标记、F 母巢集结。身份、冷却与条件全部由服务端校验。
+local function hiveHandler(
+	actionName: string,
+	inputState: Enum.UserInputState,
+	_input: InputObject
+): Enum.ContextActionResult
+	if inputState ~= Enum.UserInputState.Begin then
+		return Enum.ContextActionResult.Pass
+	end
+	if actionName == HIVE_MARK_ACTION then
+		sendAction({ action = Constants.Action.RootMark })
+	elseif actionName == HIVE_RALLY_ACTION then
+		sendAction({ action = Constants.Action.RootRally })
+	end
+	return Enum.ContextActionResult.Sink
+end
+
 local function unbind(actionName: string)
 	ContextActionService:UnbindAction(actionName)
 end
@@ -579,6 +602,23 @@ local function updateBindings()
 	elseif (not wantHuman or grabbed) and sprintBound then
 		unbind(SPRINT_ACTION)
 		sprintBound = false
+	end
+
+	local wantHive = currentState == "INFECTED"
+		and isRootSelf
+		and Workspace:GetAttribute(Constants.Attribute.HiveEnabled) == true
+	if wantHive and not hiveBound then
+		ContextActionService:BindAction(HIVE_MARK_ACTION, hiveHandler, true, Enum.KeyCode.Q)
+		ContextActionService:SetTitle(HIVE_MARK_ACTION, "MARK")
+		ContextActionService:SetPosition(HIVE_MARK_ACTION, UDim2.new(1, -240, 1, -210))
+		ContextActionService:BindAction(HIVE_RALLY_ACTION, hiveHandler, true, Enum.KeyCode.F)
+		ContextActionService:SetTitle(HIVE_RALLY_ACTION, "RALLY")
+		ContextActionService:SetPosition(HIVE_RALLY_ACTION, UDim2.new(1, -240, 1, -280))
+		hiveBound = true
+	elseif not wantHive and hiveBound then
+		unbind(HIVE_MARK_ACTION)
+		unbind(HIVE_RALLY_ACTION)
+		hiveBound = false
 	end
 
 	-- §10.2 / §11.2：按住交互（PC E / 手机自动按钮）。松开即 CancelChannel，由服务端判定是否保留读条。
@@ -661,6 +701,11 @@ local function bindCharacter(character: Model)
 		grabbingConnection:Disconnect()
 		grabbingConnection = nil
 	end
+	if rootConnection ~= nil then
+		rootConnection:Disconnect()
+		rootConnection = nil
+	end
+	isRootSelf = character:GetAttribute(Constants.Attribute.Root) == true
 
 	carryingCure = hasCarriedCure(character)
 	setState(character:GetAttribute(Constants.Attribute.State) :: string?)
@@ -680,6 +725,10 @@ local function bindCharacter(character: Model)
 	end)
 	grabbingConnection = character:GetAttributeChangedSignal(Constants.Attribute.Grabbing):Connect(function()
 		setGrabbing(character:GetAttribute(Constants.Attribute.Grabbing) == true)
+	end)
+	rootConnection = character:GetAttributeChangedSignal(Constants.Attribute.Root):Connect(function()
+		isRootSelf = character:GetAttribute(Constants.Attribute.Root) == true
+		updateBindings()
 	end)
 end
 
@@ -793,6 +842,7 @@ function InputController.init(): Controller
 	publicRemote.OnClientEvent:Connect(handlePublicEvent)
 
 	player.CharacterAdded:Connect(bindCharacter)
+	Workspace:GetAttributeChangedSignal(Constants.Attribute.HiveEnabled):Connect(updateBindings)
 	if player.Character ~= nil then
 		bindCharacter(player.Character)
 	end

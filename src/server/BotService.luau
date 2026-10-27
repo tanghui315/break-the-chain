@@ -46,6 +46,13 @@ export type Director = {
 	requestRelink: (participantId: string, targetId: string) -> boolean,
 	isChanneling: (participantId: string) -> boolean,
 	extractionOpen: () -> boolean,
+	-- §6.4 EXP-09 母巢指挥：零号 Bot 用标记 / 集结；本树 Bot 追标记目标。关闭时全部为空操作。
+	hiveEnabled: () -> boolean,
+	isRoot: (participantId: string) -> boolean,
+	requestRootMark: (participantId: string) -> boolean,
+	requestRally: (participantId: string) -> boolean,
+	isRallyChanneling: (participantId: string) -> boolean,
+	markedTargetFor: (participantId: string) -> string?,
 }
 
 local THINK_INTERVAL = 0.25
@@ -439,6 +446,17 @@ local function stepZombie(id: string, participant: ParticipantService.Participan
 		return
 	end
 
+	local activeDirector = director
+	local hive = activeDirector ~= nil and activeDirector.hiveEnabled()
+	-- 集结引导中原地站住（移动会打断引导）。
+	if hive and activeDirector ~= nil and activeDirector.isRallyChanneling(id) then
+		local humanoid = humanoidOf(participant)
+		if humanoid ~= nil then
+			humanoid:MoveTo(root.Position)
+		end
+		return
+	end
+
 	if now < ai.nextThinkAt then
 		return
 	end
@@ -463,6 +481,30 @@ local function stepZombie(id: string, participant: ParticipantService.Participan
 					bestDistance = distance
 				end
 			end
+		end
+	end
+
+	local isHiveRoot = hive and activeDirector ~= nil and activeDirector.isRoot(id)
+	if isHiveRoot and activeDirector ~= nil then
+		if best ~= nil and bestDistance <= BalanceConfig.RootMarkRange then
+			-- 看见人就标记，召唤本树丧尸（冷却由服务端控制）。
+			activeDirector.requestRootMark(id)
+		elseif best == nil and activeDirector.requestRally(id) then
+			-- 周围没有人类时立信标，让本树死亡的丧尸在前线复活。
+			ai.windupEndsAt = nil
+			clearNav(ai)
+			return
+		end
+	end
+
+	if best == nil and hive and activeDirector ~= nil then
+		-- 母巢标记：看不见人时追本树标记的目标（隔墙可见）。
+		local markedId = activeDirector.markedTargetFor(id)
+		local marked = if markedId ~= nil then ParticipantService.getById(markedId) else nil
+		local markedRoot = if marked ~= nil then rootOf(marked) else nil
+		if markedRoot ~= nil then
+			navigateTo(participant, ai, markedRoot.Position)
+			return
 		end
 	end
 

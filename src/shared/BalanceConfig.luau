@@ -37,6 +37,19 @@ local BalanceConfig = {
 	RootBiteCooldownMultiplier = 1.5,
 	RootRelinkHoldMultiplier = 1.5,
 
+	-- 母巢指挥（§6.4，EXP-09）。默认关闭；A/B 时由 Studio 调试属性 BTC_DebugHive 打开。
+	HiveAbilitiesEnabled = false,
+	RootMarkRange = 60,
+	RootMarkSeconds = 6,
+	RootMarkCooldownSeconds = 30,
+	RootMarkConvertWindowSeconds = 10, -- 标记后多少秒内被咬计入 root_mark_converted
+	RootRallyChannelSeconds = 2,
+	RootRallyBeaconSeconds = 20,
+	RootRallyCooldownSeconds = 60,
+	RootRallyInterruptCooldownSeconds = 10,
+	RootRallyMinHumanDistance = 30,
+	RootRallyMoveTolerance = 3, -- 引导期间水平移动超过该距离视为打断
+
 	-- 断联、治愈、撤离（§10、§11、§13）
 	DisconnectSeconds = 8,
 	ReconnectHoldSeconds = 1.0,

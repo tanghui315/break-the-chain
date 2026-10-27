@@ -70,6 +70,9 @@ local channelDuration = 0
 local channelUpdatedAt = -math.huge
 local channelSegments: { Frame } = {}
 local hudNoticeText: string? = nil
+-- §6.4 EXP-09：源头标记。participantId → 标记结束的服务端时刻；对应角色上挂本地隔墙轮廓。
+local hiveMarks: { [string]: number } = {}
+local hiveHighlights: { [Model]: Highlight } = {}
 local hudNoticeAt = -math.huge
 
 -- 公开标签（客户端本地创建，§17.6）
@@ -259,6 +262,34 @@ local function handlePrivateEvent(eventType: string, payload: any)
 		if type(payload.incubationEndsAt) == "number" then
 			incubationEndsAt = payload.incubationEndsAt
 		end
+	elseif eventType == PublicEventTypes.Private.HiveMark and typeof(payload) == "table" then
+		-- 本树丧尸收到：隔墙看到被标记的人类。
+		if type(payload.targetId) == "string" and type(payload.seconds) == "number" then
+			hiveMarks[payload.targetId] = Workspace:GetServerTimeNow() + payload.seconds
+			feed("SOURCE MARKED A TARGET", VisualTokens.Color.Zombie)
+		end
+	elseif eventType == PublicEventTypes.Private.YouAreMarked and typeof(payload) == "table" then
+		-- 被标记者：明确告知，给出反制时间（找掩体 / 靠近持枪队友）。
+		feed("THE SOURCE MARKED YOU — BREAK LINE OF SIGHT", VisualTokens.Color.Zombie)
+		hudNoticeText = "MARKED — zombies can see you"
+		hudNoticeAt = Workspace:GetServerTimeNow()
+	elseif eventType == PublicEventTypes.Private.HiveAbilityResult and typeof(payload) == "table" then
+		local ability = if payload.ability == "RALLY" then "RALLY" else "MARK"
+		local reason = if type(payload.reason) == "string" then payload.reason else ""
+		local readyIn = if ability == "RALLY" then payload.rallyReadyIn else payload.markReadyIn
+		if reason == "OK" then
+			feed("TARGET MARKED", VisualTokens.Color.Zombie)
+		elseif reason == "CHANNEL" then
+			feed("RALLYING — HOLD STILL", VisualTokens.Color.Zombie)
+		elseif reason == "PLACED" then
+			feed("HIVE BEACON UP — YOUR DEAD RISE HERE", VisualTokens.Color.Zombie)
+		else
+			local suffix = if type(readyIn) == "number" and readyIn > 0
+				then string.format(" (%ds)", math.ceil(readyIn))
+				else ""
+			hudNoticeText = `{ability}: {reason}{suffix}`
+			hudNoticeAt = Workspace:GetServerTimeNow()
+		end
 	elseif eventType == PublicEventTypes.Private.YouAreSource then
 		-- §6.1：公开身份但私有告知，让零号知道自己会被优先猎杀。
 		feed("YOU ARE THE SOURCE", VisualTokens.Color.Zombie)
@@ -347,6 +378,42 @@ local function refreshHighlights()
 					highlight.Parent = child
 					highlights[child] = highlight
 				end
+			end
+		end
+	end
+end
+
+-- §6.4 EXP-09：给仍在标记期内的角色挂 AlwaysOnTop 轮廓；过期或角色消失即移除。
+local function refreshHiveMarks()
+	local now = Workspace:GetServerTimeNow()
+	for id, endsAt in hiveMarks do
+		if now >= endsAt then
+			hiveMarks[id] = nil
+		end
+	end
+	for model, highlight in hiveHighlights do
+		local id = model:GetAttribute(Constants.Attribute.ParticipantId)
+		if model.Parent == nil or type(id) ~= "string" or hiveMarks[id] == nil then
+			highlight:Destroy()
+			hiveHighlights[model] = nil
+		end
+	end
+	if next(hiveMarks) == nil then
+		return
+	end
+	for _, child in Workspace:GetChildren() do
+		if child:IsA("Model") and (hiveHighlights[child] :: Highlight?) == nil then
+			local id = child:GetAttribute(Constants.Attribute.ParticipantId)
+			if type(id) == "string" and hiveMarks[id] ~= nil then
+				local highlight = Instance.new("Highlight")
+				highlight.Name = "BTC_HiveMark"
+				highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+				highlight.FillColor = VisualTokens.Color.Zombie
+				highlight.FillTransparency = 0.7
+				highlight.OutlineColor = VisualTokens.Color.Zombie
+				highlight.OutlineTransparency = 0
+				highlight.Parent = child
+				hiveHighlights[child] = highlight
 			end
 		end
 	end
@@ -951,6 +1018,7 @@ function HUDController.init(controller: InputController.Controller)
 		refreshPhase()
 		refreshHighlights()
 		refreshTags()
+		refreshHiveMarks()
 		refreshCombatFeed()
 	end)
 
