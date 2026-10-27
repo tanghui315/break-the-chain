@@ -141,7 +141,7 @@ local function syncAttributes(rt: Runtime, now: number)
 	local maximum = ZombieCombat.maxHealthOf(rt.combat)
 	local ratio = if maximum > 0 then math.clamp(ZombieCombat.healthOf(rt.combat) / maximum, 0, 1) else 0
 	character:SetAttribute(Constants.Attribute.Health, ratio)
-	character:SetAttribute(Constants.Attribute.Protected, ZombieCombat.isRespawnProtected(rt.combat, now))
+	character:SetAttribute(Constants.Attribute.Protected, ZombieCombat.isDamageProtected(rt.combat, now))
 
 	local deadUntil = rt.combat.deadUntil
 	if ZombieCombat.stateOf(rt.combat) == "DEAD" and deadUntil ~= nil then
@@ -311,6 +311,11 @@ local function onDowned(rt: Runtime, now: number)
 	)
 end
 
+-- §6.2 第 7 条：零号死亡等待减半，普通丧尸按人数档。
+local function deadSecondsFor(rt: Runtime): number
+	return if rt.isRoot then respawnSeconds * BalanceConfig.RootRespawnMultiplier else respawnSeconds
+end
+
 local function onDied(rt: Runtime, now: number)
 	local root = nil
 	local participant = ParticipantService.getById(rt.id)
@@ -323,7 +328,7 @@ local function onDied(rt: Runtime, now: number)
 
 	rt.diedAt = now
 	-- 名义死亡时长用于判断“最后一只丧尸”是否缩短过复活时间；实际 deadUntil 由纯逻辑给出。
-	rt.fullDeadSeconds = respawnSeconds
+	rt.fullDeadSeconds = deadSecondsFor(rt)
 	hideCharacter(rt)
 	clearBiteRecord(rt.id)
 	print(
@@ -331,7 +336,7 @@ local function onDied(rt: Runtime, now: number)
 			"[Telemetry] zombie_killed isRoot=%s isUnstable=%s respawnSeconds=%s",
 			tostring(rt.isRoot),
 			tostring(isUnstable(rt.id)),
-			tostring(respawnSeconds)
+			tostring(deadSecondsFor(rt))
 		)
 	)
 end
@@ -441,6 +446,10 @@ function ZombieCombatService.createFor(participantId: string, isRoot: boolean, n
 	end
 	local rt = newRuntime(participantId, isRoot, now)
 	zombies[participantId] = rt
+	if isRoot then
+		-- §6.2 第 7 条：零号尸变完成即获得爆发保护（零号只会在爆发时尸变一次）。
+		ZombieCombat.grantOutbreakProtection(rt.combat, now + BalanceConfig.RootOutbreakProtectionSeconds)
+	end
 	syncAttributes(rt, now)
 	applyCombatSpeed(rt, now)
 end
@@ -504,9 +513,10 @@ function ZombieCombatService.canBeHit(participantId: string, now: number): boole
 	return not ZombieCombat.isRespawnProtected(rt.combat, now)
 end
 
+-- 复活保护或零号爆发保护（公开 PROTECTED 标签；Bot 人类不对其浪费子弹）。
 function ZombieCombatService.isProtected(participantId: string, now: number): boolean
 	local rt = zombies[participantId]
-	return rt ~= nil and ZombieCombat.isRespawnProtected(rt.combat, now)
+	return rt ~= nil and ZombieCombat.isDamageProtected(rt.combat, now)
 end
 
 function ZombieCombatService.isDead(participantId: string): boolean
@@ -635,7 +645,7 @@ function ZombieCombatService.handleFall(participantId: string, now: number): boo
 		return true
 	end
 
-	ZombieCombat.forceDeath(rt.combat, now, respawnSeconds)
+	ZombieCombat.forceDeath(rt.combat, now, deadSecondsFor(rt))
 	onDied(rt, now)
 	syncAttributes(rt, now)
 	applyCombatSpeed(rt, now)
@@ -668,7 +678,7 @@ function ZombieCombatService.step(now: number)
 		end
 
 		local events = ZombieCombat.tick(rt.combat, now, {
-			respawnSeconds = respawnSeconds,
+			respawnSeconds = deadSecondsFor(rt),
 			noZombieCanAct = noZombieCanAct,
 		})
 		for _, event in events do

@@ -37,6 +37,8 @@ export type Zombie = {
 	-- 已经发过 RESPAWN_READY，等服务端选好复活点后调用 respawn()；避免每个 tick 重复发事件。
 	respawnReady: boolean,
 	respawnProtectionUntil: number?,
+	-- §6.2 第 7 条：零号爆发保护。只挡伤害，不挡击退与电击；主动攻击也不会提前结束。
+	outbreakProtectionUntil: number?,
 	stunUntil: number,
 	-- 电击结束后 ControlImmunitySeconds 内不能再被电击（§9A.3）。
 	controlImmuneUntil: number,
@@ -136,6 +138,7 @@ function ZombieCombat.new(config: Config, isRoot: boolean, now: number): Zombie
 		deadUntil = nil,
 		respawnReady = false,
 		respawnProtectionUntil = nil,
+		outbreakProtectionUntil = nil,
 		stunUntil = now,
 		controlImmuneUntil = now,
 		windupStartedAt = nil,
@@ -169,6 +172,18 @@ function ZombieCombat.applyDamage(z: Zombie, amount: number, now: number): Damag
 
 	local protectionUntil = z.respawnProtectionUntil
 	if protectionUntil ~= nil and now < protectionUntil then
+		return {
+			applied = false,
+			reason = Reason.PROTECTED,
+			downed = false,
+			interruptedWindup = false,
+			health = z.health,
+			events = events,
+		}
+	end
+
+	local outbreakUntil = z.outbreakProtectionUntil
+	if outbreakUntil ~= nil and now < outbreakUntil then
 		return {
 			applied = false,
 			reason = Reason.PROTECTED,
@@ -397,6 +412,21 @@ end
 function ZombieCombat.isRespawnProtected(z: Zombie, now: number): boolean
 	local protectionUntil = z.respawnProtectionUntil
 	return protectionUntil ~= nil and now < protectionUntil
+end
+
+-- §6.2 第 7 条：零号尸变完成时调用，until 之前不受伤害（击退 / 电击照常）。
+function ZombieCombat.grantOutbreakProtection(z: Zombie, untilAt: number)
+	z.outbreakProtectionUntil = untilAt
+end
+
+function ZombieCombat.isOutbreakProtected(z: Zombie, now: number): boolean
+	local untilAt = z.outbreakProtectionUntil
+	return untilAt ~= nil and now < untilAt
+end
+
+-- 公开“PROTECTED”标签与 Bot 选靶用：复活保护或爆发保护任一生效。
+function ZombieCombat.isDamageProtected(z: Zombie, now: number): boolean
+	return ZombieCombat.isRespawnProtected(z, now) or ZombieCombat.isOutbreakProtected(z, now)
 end
 
 function ZombieCombat.isRespawnReady(z: Zombie): boolean

@@ -152,7 +152,10 @@ local function isActiveZombie(id: string, now: number): boolean
 end
 
 local function isHittableZombie(id: string, now: number): boolean
-	return PlayerStateService.stateFor(id) == "INFECTED" and ZombieCombatService.canBeHit(id, now)
+	-- 受保护（复活保护 / 零号爆发保护）的丧尸不掉血：Bot 不浪费子弹，按威胁处理（逃离）。
+	return PlayerStateService.stateFor(id) == "INFECTED"
+		and ZombieCombatService.canBeHit(id, now)
+		and not ZombieCombatService.isProtected(id, now)
 end
 
 local function spawnPosition(spawnIndex: number): Vector3

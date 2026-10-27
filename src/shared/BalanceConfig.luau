@@ -36,6 +36,10 @@ local BalanceConfig = {
 	MaxOutbreakNPCs = 2,
 	RootBiteCooldownMultiplier = 1.5,
 	RootRelinkHoldMultiplier = 1.5,
+	-- §6.2 第 7 条：零号尸变完成后的爆发保护（枪械/短棍不掉血，击退与电击照常），保证开局 60 秒内能完成首次感染。
+	RootOutbreakProtectionSeconds = 15,
+	-- §6.2 第 7 条：零号死亡等待 = 人数档复活时间 × 该倍率（普通丧尸不变）。
+	RootRespawnMultiplier = 0.5,
 
 	-- 母巢指挥（§6.4，EXP-09）。默认关闭；A/B 时由 Studio 调试属性 BTC_DebugHive 打开。
 	HiveAbilitiesEnabled = false,
