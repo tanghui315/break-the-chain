@@ -6,6 +6,8 @@
 export type Config = {
 	BiteWindupSeconds: number,
 	BiteCooldownSeconds: number,
+	-- §6.2 / D2：零号前摇被打断时的冷却倍率（与普通扑咬冷却一致）。
+	RootBiteCooldownMultiplier: number,
 	ZombieMaxHealth: number,
 	ZombieRegenDelaySeconds: number,
 	ZombieRegenPerSecond: number,
@@ -111,7 +113,12 @@ local function interruptWindup(z: Zombie, now: number): (boolean, number?)
 	if now - startedAt > z.config.BiteWindupSeconds + EPSILON then
 		return false, nil
 	end
-	return true, now + z.config.BiteCooldownSeconds
+	-- §6.2 / D2：被打断的零号同样按倍率收取扑咬冷却。
+	local cooldown = z.config.BiteCooldownSeconds
+	if z.isRoot then
+		cooldown *= z.config.RootBiteCooldownMultiplier
+	end
+	return true, now + cooldown
 end
 
 function ZombieCombat.new(config: Config, isRoot: boolean, now: number): Zombie

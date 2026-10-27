@@ -44,7 +44,7 @@ local BalanceConfig = {
 	CuredImmunitySeconds = 7,
 	CureRetryCooldownSeconds = 1.5, -- §10.1：失败/取消的治愈尝试后的短冷却，防止刷交互
 	ExtractionWindowSeconds = 90,
-	ContainmentStableSeconds = 3, -- §13.3：遏制胜利前的短暂稳定性复核窗口
+	ContainmentStableSeconds = 5, -- §6.3：遏制胜利前的 5 秒稳定性复核窗口
 
 	-- 战斗（§9）
 	BiteWindupSeconds = 0.35,
@@ -133,6 +133,8 @@ local BalanceConfig = {
 		LungeDistance = 9,
 		LungeSeconds = 0.25,
 		BiteMissRecoverySeconds = 0.6,
+		-- §9.2：扑空后的后摇期间丧尸移动速度减半。
+		BiteMissRecoverySpeedMultiplier = 0.5,
 		BiteCommitSlackSeconds = 0.15,
 		BiteRange = 5.5,
 		BiteTolerance = 1.5,

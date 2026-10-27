@@ -136,12 +136,15 @@ function CombatService.nearestHuman(
 	for id, participant in ParticipantService.all() do
 		if id ~= attackerId then
 			local state = PlayerStateService.stateFor(id)
+			local targetRecord = PlayerStateService.get(id)
+			local immuneUntil = if targetRecord ~= nil then targetRecord.curedImmuneUntil else nil
 			local root = rootOf(participant)
 			if
 				state == "HUMAN"
 				and root ~= nil
 				and not GrabService.isGrabbed(id)
 				and not GrabService.isBiteImmune(id, now)
+				and not (immuneUntil ~= nil and immuneUntil > now)
 			then
 				local delta = root.Position - origin
 				local horizontal = Vector3.new(delta.X, 0, delta.Z)
@@ -173,11 +176,14 @@ local function resolveTarget(
 ): (ParticipantService.Participant?, PlayerStateService.Record?, BasePart?)
 	if targetIdHint ~= nil and targetIdHint ~= attackerId then
 		local participant = ParticipantService.getById(targetIdHint)
+		local hintRecord = PlayerStateService.get(targetIdHint)
+		local immuneUntil = if hintRecord ~= nil then hintRecord.curedImmuneUntil else nil
 		if
 			participant ~= nil
 			and PlayerStateService.stateFor(targetIdHint) == "HUMAN"
 			and not GrabService.isGrabbed(targetIdHint)
 			and not GrabService.isBiteImmune(targetIdHint, now)
+			and not (immuneUntil ~= nil and immuneUntil > now)
 		then
 			return participant, PlayerStateService.get(targetIdHint), rootOf(participant)
 		end
@@ -218,9 +224,10 @@ function CombatService.startBite(attackerId: string, now: number): (boolean, str
 	-- §9A.3：主动攻击立即结束复活保护；§9A.4：前摇期间可被武器/电击打断。
 	ZombieCombatService.onAttack(attackerId, now)
 	if not ZombieCombatService.beginWindup(attackerId, now) then
+		-- BiteRules 已成功开始但战斗状态不再允许前摇：清掉镜像即可，
+		-- 不能按“放弃的前摇”补收冷却——这次扑咬从未真正发生。
 		record.windupStartedAt = nil
 		record.windupConsumed = true
-		record.biteCooldownUntil = now + BalanceConfig.BiteCooldownSeconds
 		return false, "NOT_ACTIVE"
 	end
 	return true, reason
@@ -262,7 +269,12 @@ function CombatService.tryBite(attackerId: string, targetIdHint: string?, now: n
 
 	-- §9A.6：擒抱被解除后 1.5 秒防扑咬保护。命中前就拒绝，避免 BiteRules 把一次“免疫”算作有效命中。
 	if target ~= nil and GrabService.isBiteImmune(target.id, now) then
-		local cooldownUntil = now + BalanceConfig.BiteCooldownSeconds
+		-- §6.2 / D2：零号的扑咬冷却 ×RootBiteCooldownMultiplier。
+		local cooldownSeconds = BalanceConfig.BiteCooldownSeconds
+		if attackerRecord.isRoot then
+			cooldownSeconds *= BalanceConfig.RootBiteCooldownMultiplier
+		end
+		local cooldownUntil = now + cooldownSeconds
 		attackerRecord.biteCooldownUntil = cooldownUntil
 		attackerRecord.windupStartedAt = nil
 		attackerRecord.windupConsumed = true
@@ -317,6 +329,12 @@ function CombatService.tryBite(attackerId: string, targetIdHint: string?, now: n
 
 	if result.hit and target ~= nil and onBite ~= nil then
 		onBite(attackerId, target.id, now)
+	end
+
+	-- §9.2：扑空后摇期间丧尸按倍率减速；存入记录，由 speedFor 应用。
+	if not result.hit and result.recoverUntil ~= nil then
+		attackerRecord.biteMissRecoverUntil = result.recoverUntil
+		PlayerStateService.applySpeed(attackerRecord)
 	end
 
 	if result.nearMiss then

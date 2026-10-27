@@ -292,12 +292,18 @@ local function spawnCFrameFor(index: number): CFrame
 	return CFrame.new(point.x, GreyboxLayout.floorTopY + GreyboxLayout.characterSpawnY, point.z)
 end
 
+-- §22.2：isUnstable 报的是感染身份（PlayerStateService UNSTABLE），不是战斗状态。
+local function isUnstable(participantId: string): boolean
+	return PlayerStateService.stateFor(participantId) == "UNSTABLE"
+end
+
 local function onDowned(rt: Runtime, now: number)
 	clearBiteRecord(rt.id)
 	print(
 		string.format(
-			"[Telemetry] zombie_downed isRoot=%s isUnstable=false downedByWeapon=true elapsedSec=%s",
+			"[Telemetry] zombie_downed isRoot=%s isUnstable=%s downedByWeapon=true elapsedSec=%s",
 			tostring(rt.isRoot),
+			tostring(isUnstable(rt.id)),
 			elapsedSec(now)
 		)
 	)
@@ -320,8 +326,9 @@ local function onDied(rt: Runtime, now: number)
 	clearBiteRecord(rt.id)
 	print(
 		string.format(
-			"[Telemetry] zombie_killed isRoot=%s isUnstable=false respawnSeconds=%s",
+			"[Telemetry] zombie_killed isRoot=%s isUnstable=%s respawnSeconds=%s",
 			tostring(rt.isRoot),
+			tostring(isUnstable(rt.id)),
 			tostring(respawnSeconds)
 		)
 	)
@@ -363,11 +370,12 @@ local function respawn(rt: Runtime, now: number)
 	local nearest = nearestHumanDistance(zone, humans)
 	print(
 		string.format(
-			"[Telemetry] zombie_respawned spawnZone=%s nearestHumanDistance=%s deadSeconds=%s lastZombieCapApplied=%s",
+			"[Telemetry] zombie_respawned spawnZone=%s nearestHumanDistance=%s deadSeconds=%s lastZombieCapApplied=%s isUnstable=%s",
 			tostring(index),
 			if nearest == math.huge then "inf" else string.format("%.1f", nearest),
 			string.format("%.1f", deadSeconds),
-			tostring(capsApplied)
+			tostring(capsApplied),
+			tostring(isUnstable(rt.id))
 		)
 	)
 	rt.diedAt = nil

@@ -31,6 +31,8 @@ export type Record = {
 	movementLocked: boolean,
 	-- §9A.3：丧尸战斗生命状态给出的速度覆盖（倒地 4 / 电击 0 / 死亡 0）；ACTIVE 时为 nil。
 	combatSpeed: number?,
+	-- §9.2：扑空后摇的结束时刻；期间丧尸移速 ×Greybox.BiteMissRecoverySpeedMultiplier。
+	biteMissRecoverUntil: number?,
 	history: PositionHistory.History,
 	lastHistoryAt: number,
 	lastStaminaPublishAt: number,
@@ -65,6 +67,7 @@ function PlayerStateService.createFor(participant: ParticipantService.Participan
 		sprintWanted = false,
 		movementLocked = false,
 		combatSpeed = nil,
+		biteMissRecoverUntil = nil,
 		history = PositionHistory.new(historyConfig),
 		lastHistoryAt = -math.huge,
 		lastStaminaPublishAt = -math.huge,
@@ -111,7 +114,8 @@ end
 
 -- HUMAN 用耐力速度；INCUBATING 在公开尸变过渡期间仍按人类步行；INFECTED 用丧尸奔跑速度。
 -- 战斗状态与擒抱覆盖优先：DEAD / STUNNED / 擒抱 → 0，DOWNED → 4（§9A.3、§9A.6）。
-function PlayerStateService.speedFor(record: Record): number
+-- §9.2：丧尸扑空后摇期间移速 ×BiteMissRecoverySpeedMultiplier；状态离开丧尸身份时不再适用。
+function PlayerStateService.speedFor(record: Record, now: number?): number
 	if record.movementLocked then
 		return 0
 	end
@@ -119,7 +123,16 @@ function PlayerStateService.speedFor(record: Record): number
 	if combatSpeed ~= nil then
 		return combatSpeed
 	end
-	return PlayerStateService.baseSpeedFor(record)
+	local base = PlayerStateService.baseSpeedFor(record)
+	local recoverUntil = record.biteMissRecoverUntil
+	if
+		recoverUntil ~= nil
+		and (record.state == "INFECTED" or record.state == "UNSTABLE")
+		and (now == nil or now < recoverUntil)
+	then
+		return base * BalanceConfig.Greybox.BiteMissRecoverySpeedMultiplier
+	end
+	return base
 end
 
 -- 锁定引擎死亡（§9A.3、§9A.5）：生命值只存在于 ZombieCombat，不使用 Humanoid.Health；
@@ -160,8 +173,9 @@ function PlayerStateService.applyVisual(record: Record)
 
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if humanoid ~= nil then
+		local now = workspace:GetServerTimeNow()
 		applyJumpLock(record, humanoid)
-		humanoid.WalkSpeed = PlayerStateService.speedFor(record)
+		humanoid.WalkSpeed = PlayerStateService.speedFor(record, now)
 	end
 	PlayerStateService.publishProtection(record, workspace:GetServerTimeNow())
 end
@@ -201,7 +215,7 @@ function PlayerStateService.applySpeed(record: Record)
 	end
 	local humanoid = participant.character:FindFirstChildOfClass("Humanoid")
 	if humanoid ~= nil then
-		humanoid.WalkSpeed = PlayerStateService.speedFor(record)
+		humanoid.WalkSpeed = PlayerStateService.speedFor(record, workspace:GetServerTimeNow())
 	end
 end
 
@@ -224,7 +238,7 @@ function PlayerStateService.setMovementLocked(id: string, locked: boolean)
 				humanoid:Move(Vector3.zero, false)
 			end
 			applyJumpLock(record, humanoid)
-			humanoid.WalkSpeed = PlayerStateService.speedFor(record)
+			humanoid.WalkSpeed = PlayerStateService.speedFor(record, workspace:GetServerTimeNow())
 		end
 	end
 end
@@ -256,6 +270,8 @@ function PlayerStateService.setState(id: string, state: Types.PlayerState)
 	record.state = state
 	-- 战斗覆盖只属于丧尸生命状态；主状态改变时交给 ZombieCombatService 下一次同步重建。
 	record.combatSpeed = nil
+	-- §9.2：阵营/断联切换结束后摇减速，避免治愈/恢复后残留。
+	record.biteMissRecoverUntil = nil
 	if state ~= "HUMAN" then
 		record.sprintWanted = false
 		Stamina.setSprintIntent(record.stamina, false)

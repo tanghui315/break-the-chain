@@ -931,6 +931,227 @@ describe("RoundStateMachine", function()
 		expect(accepted > 0).toBe(true)
 		expect(rejected > 0).toBe(true)
 	end)
+
+	-- 建链 U:1 → U:2 → U:3，治愈 U:2：U:2 回到 HUMAN，下游 U:3 进入 UNSTABLE。
+	local function buildUnstableU3(round: RoundStateMachine.Round, hooks: RoundStateMachine.Hooks)
+		toContest(round, hooks)
+		expect(RoundStateMachine.onBite(round, "U:1", "U:2", 2.5).ok).toBe(true)
+		tick(round, 3.5, hooks)
+		expect(RoundStateMachine.onBite(round, "U:2", "U:3", 4).ok).toBe(true)
+		tick(round, 5, hooks)
+		expectState(round, "U:3", InfectionGraph.State.INFECTED)
+		pickUp(round, "C:1", "U:5")
+		expect(RoundStateMachine.requestCure(round, "U:5", "U:2", 5).ok).toBe(true)
+		tick(round, 6, hooks)
+		expectState(round, "U:2", InfectionGraph.State.HUMAN)
+		expectState(round, "U:3", InfectionGraph.State.UNSTABLE)
+	end
+
+	it("a relink finishing on the unstable deadline tick wins over expiry (§11.4)", function()
+		-- 回归：RSM.tick 过去先跑 InfectionGraph.tick（过期结算）再跑 ChannelTimer.tick，
+		-- 导致在截止时间同一 tick 完成的 RELINK 永远输给过期。
+		local round = newRound({ "U:1", "U:2", "U:3", "U:4", "U:5" })
+		local _hookState, hooks = makeHooks()
+		buildUnstableU3(round, hooks)
+		local deadline = stateOf(round, "U:3").unstableEndsAt :: number
+
+		-- 目标是零号，读条按 RootRelinkHoldMultiplier 拉长；恰好在 deadline 这一 tick 累计满。
+		local hold = BASE_CONFIG.ReconnectHoldSeconds * BASE_CONFIG.RootRelinkHoldMultiplier
+		expect(RoundStateMachine.requestRelink(round, "U:3", "U:1", deadline - hold).ok).toBe(true)
+		local events = tick(round, deadline, hooks).events
+		expectState(round, "U:3", InfectionGraph.State.INFECTED)
+		expect(countType(events, EventName.RelinkSucceeded)).toBe(1)
+		expect(filterType(events, EventName.RelinkSucceeded)[1].unstableEndsAt).toBe(deadline)
+
+		-- 对照：没有读条时同一 deadline tick 照常过期回 HUMAN。
+		local control = newRound({ "U:1", "U:2", "U:3", "U:4", "U:5" }, { roundId = "control" })
+		buildUnstableU3(control, hooks)
+		tick(control, stateOf(control, "U:3").unstableEndsAt :: number, hooks)
+		expectState(control, "U:3", InfectionGraph.State.HUMAN)
+	end)
+
+	it("cancels a relink channel when the actor can no longer fight (§9A.3)", function()
+		-- canRelinkActor 钩子在每个 tick 校验：断联丧尸倒地后读条立即取消。
+		local round = newRound({ "U:1", "U:2", "U:3", "U:4", "U:5" })
+		local _hookState, hooks = makeHooks()
+		buildUnstableU3(round, hooks)
+
+		local downed: { [string]: boolean } = {}
+		hooks.canRelinkActor = function(actorId: string): boolean
+			return not downed[actorId]
+		end
+
+		expect(RoundStateMachine.requestRelink(round, "U:3", "U:1", 6).ok).toBe(true)
+		expect(ChannelTimer.get(round.channels, "U:3")).toBeTruthy()
+
+		downed["U:3"] = true
+		local events = tick(round, 6.2, hooks).events
+		expect(ChannelTimer.get(round.channels, "U:3")).toBeNil()
+		expectState(round, "U:3", InfectionGraph.State.UNSTABLE)
+		expect(countType(events, EventName.ChannelCancelled)).toBe(1)
+		expect(countType(events, EventName.RelinkSucceeded)).toBe(0)
+
+		-- 倒地期间重连请求照常受理（状态仍 UNSTABLE），但下一 tick 仍被钩子取消。
+		expect(RoundStateMachine.requestRelink(round, "U:3", "U:1", 6.3).ok).toBe(true)
+		tick(round, 6.4, hooks)
+		expect(ChannelTimer.get(round.channels, "U:3")).toBeNil()
+	end)
+
+	it("skips cure-immune humans when picking seeds (§6.1)", function()
+		local round = newRound({ "U:1", "U:2" })
+		local _hookState, hooks = makeHooks()
+		round.graph.participants["U:1"].curedImmuneUntil = 5
+
+		local events = tick(round, 1, hooks).events
+		local started = filterType(events, EventName.OutbreakStarted)[1]
+		expect(started.seedIds[1]).toBe("U:2")
+		expectState(round, "U:2", InfectionGraph.State.INCUBATING)
+		expectState(round, "U:1", InfectionGraph.State.HUMAN)
+	end)
+
+	it("drops a failed seed slot instead of failing the outbreak when another seed is stable (§6.1)", function()
+		local round = newRound({ "U:1", "U:2", "U:3" }, { plan = makePlan({ seedCount = 2 }) })
+		local _hookState, hooks = makeHooks()
+		tick(round, 1, hooks)
+		expect(#round.seedSlots).toBe(2)
+
+		-- 错开两位零号的尸变时刻：U:1 在 t=2 公开，U:2 仍在过渡中；U:3 处于治愈保护期，没有候选可补选。
+		round.graph.participants["U:2"].incubationEndsAt = 3
+		round.graph.participants["U:3"].curedImmuneUntil = 10
+		RoundStateMachine.removeParticipant(round, "U:2", 1.9, "pos")
+
+		local events = tick(round, 2, hooks).events
+		expectState(round, "U:1", InfectionGraph.State.INFECTED)
+		expect(round.phase).toBe(Phase.CONTEST)
+		expect(round.winner).toBeNil()
+		expect(countType(events, EventName.Anomaly)).toBe(0)
+		expect(#round.seedSlots).toBe(1)
+		expect(round.seedSlots[1].status).toBe("STABLE")
+	end)
+
+	it("broadcasts BreachWarning exactly once before PREPARE ends (§6.1)", function()
+		local round = newRound({ "U:1", "U:2" }, { config = makeConfig({ PrepareSeconds = 5 }) })
+		local _hookState, hooks = makeHooks()
+		local log: { any } = {}
+
+		tickInto(log, round, 0, hooks)
+		expect(countType(log, EventName.BreachWarning)).toBe(0)
+		tickInto(log, round, 1.9, hooks)
+		expect(countType(log, EventName.BreachWarning)).toBe(0)
+
+		local warned = tickInto(log, round, 2, hooks)
+		expect(countType(warned, EventName.BreachWarning)).toBe(1)
+		expect(warned[#warned].scope).toBe("PUBLIC")
+
+		tickInto(log, round, 3, hooks)
+		tickInto(log, round, 5, hooks)
+		expect(countType(log, EventName.BreachWarning)).toBe(1)
+	end)
+
+	it("sends YouAreSource only to seeds and YouAreIncubating with the deadline (§7.3)", function()
+		local round = newRound({ "U:1", "U:2", "U:3" })
+		local _hookState, hooks = makeHooks()
+		local events = tick(round, 1, hooks).events
+
+		local sources = filterType(events, EventName.YouAreSource)
+		expect(#sources).toBe(1)
+		expect(sources[1].scope).toBe("PRIVATE")
+		expect(sources[1].participantId).toBe("U:1")
+
+		local incubating = filterType(events, EventName.YouAreIncubating)
+		expect(#incubating).toBe(1)
+		expect(incubating[1].participantId).toBe("U:1")
+		expect(incubating[1].incubationEndsAt).toBe(2)
+
+		-- 扑咬进入 INCUBATING 时同样发送，但不带 YouAreSource。
+		tick(round, 2, hooks)
+		local bite = RoundStateMachine.onBite(round, "U:1", "U:2", 2.5)
+		expect(bite.ok).toBe(true)
+		local biteIncubating = filterType(bite.events, EventName.YouAreIncubating)
+		expect(#biteIncubating).toBe(1)
+		expect(biteIncubating[1].participantId).toBe("U:2")
+		expect(biteIncubating[1].incubationEndsAt).toBe(3.5)
+		expect(countType(bite.events, EventName.YouAreSource)).toBe(0)
+	end)
+
+	it("lowers the extraction target once when leavers make it unreachable, never raises it (§5.4)", function()
+		local round = newRound({ "U:1", "U:2", "U:3" }, { plan = makePlan({ requiredExtracted = 2 }) })
+		local _hookState, hooks = makeHooks()
+		local log: { any } = {}
+		toContest(round, hooks)
+
+		-- 零号 U:1 不可治愈；U:2、U:3 两名人类，目标 2 刚好可达，不触发修正。
+		tickInto(log, round, 2.5, hooks)
+		expect(round.requiredExtracted).toBe(2)
+
+		-- 感染本身不触发：被咬的普通丧尸仍可被治愈后撤离（“可恢复丧尸”）。
+		expect(RoundStateMachine.onBite(round, "U:1", "U:2", 2.6).ok).toBe(true)
+		tickInto(log, round, 3.6, hooks)
+		expectState(round, "U:2", InfectionGraph.State.INFECTED)
+		expect(round.requiredExtracted).toBe(2)
+		expect(countType(log, EventName.ExtractionTargetAdjusted)).toBe(0)
+
+		-- U:3 离局：可撤离容量只剩 U:2（可治愈丧尸）= 1，目标降到 1。
+		local removed = RoundStateMachine.removeParticipant(round, "U:3", 3.7, nil)
+		for _, event in removed.events do
+			table.insert(log, event)
+		end
+		local events = tickInto(log, round, 3.8, hooks)
+		expect(round.requiredExtracted).toBe(1)
+		local adjusted = filterType(events, EventName.ExtractionTargetAdjusted)
+		expect(#adjusted).toBe(1)
+		expect(adjusted[1].scope).toBe("PUBLIC")
+		expect(adjusted[1].requiredExtracted).toBe(1)
+
+		-- 修正只执行一次：后续 tick 不再发事件、目标不再变化。
+		tickInto(log, round, 4, hooks)
+		expect(countType(log, EventName.ExtractionTargetAdjusted)).toBe(1)
+		expect(round.requiredExtracted).toBe(1)
+	end)
+
+	it("floors the adjusted extraction target at 1 (§5.4)", function()
+		local round = newRound({ "U:1", "U:2", "U:3" }, { plan = makePlan({ requiredExtracted = 1 }) })
+		local _hookState, hooks = makeHooks()
+		toContest(round, hooks)
+
+		-- 两名人类都离局：容量 0，目标 max(1, 0) = 1 等于原值，标记已用但不下发事件。
+		RoundStateMachine.removeParticipant(round, "U:2", 2.5, nil)
+		RoundStateMachine.removeParticipant(round, "U:3", 2.5, nil)
+		local events = tick(round, 2.6, hooks).events
+		expect(round.requiredExtracted).toBe(1)
+		expect(round.extractTargetAdjusted).toBe(true)
+		expect(countType(events, EventName.ExtractionTargetAdjusted)).toBe(0)
+	end)
+
+	it("cancels an extraction hold while the human is grabbed (§13.2)", function()
+		local round = newRound({ "U:1", "U:2" })
+		local hookState, hooks = makeHooks()
+		local grabbed: { [string]: boolean } = {}
+		hooks.isGrabbed = function(actorId: string): boolean
+			return grabbed[actorId] == true
+		end
+		toContest(round, hooks)
+
+		hookState.zone["U:2"] = true
+		tick(round, 20, hooks)
+		expect(round.phase).toBe(Phase.EXTRACTION)
+
+		-- 被擒抱中不自动开始撤离读条。
+		grabbed["U:2"] = true
+		tick(round, 20.5, hooks)
+		expect(ChannelTimer.get(round.channels, "U:2")).toBeNil()
+
+		-- 擒抱解除后自动开始；再次被抓立即取消。
+		grabbed["U:2"] = false
+		tick(round, 20.6, hooks)
+		expect(ChannelTimer.get(round.channels, "U:2")).toBeTruthy()
+
+		grabbed["U:2"] = true
+		local events = tick(round, 20.7, hooks).events
+		expect(ChannelTimer.get(round.channels, "U:2")).toBeNil()
+		expect(countType(events, EventName.ChannelCancelled)).toBe(1)
+		expect(round.extractedCount).toBe(0)
+	end)
 end)
 
 TestKit.finish()

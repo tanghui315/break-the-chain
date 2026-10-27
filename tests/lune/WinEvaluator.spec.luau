@@ -254,7 +254,7 @@ describe("WinEvaluator", function()
 	end)
 
 	it("exposes the new balance keys with the agreed baseline values", function()
-		expect(BalanceConfig.ContainmentStableSeconds).toBe(3)
+		expect(BalanceConfig.ContainmentStableSeconds).toBe(5)
 		expect(BalanceConfig.CureRetryCooldownSeconds).toBe(1.5)
 	end)
 end)

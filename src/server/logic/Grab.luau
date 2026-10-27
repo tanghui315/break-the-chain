@@ -9,6 +9,8 @@ export type Config = {
 	GrabSeconds: number,
 	GrabEscapeImmunitySeconds: number,
 	BiteCooldownSeconds: number,
+	-- §6.2 / D2：零号擒抱被解除后的扑咬冷却倍率。
+	RootBiteCooldownMultiplier: number,
 }
 
 export type Grab = {
@@ -159,7 +161,8 @@ end
 
 -- 擒抱中的丧尸受到任何武器命中、击退或电击：解除擒抱并给人类 1.5 秒防扑咬保护（§9A.6）。
 -- 解除后这个 grab 已从状态中移除，同一 tick 的 tick() 不会再次把它当作完成。
-function Grab.onZombieHit(state: State, zombieId: string, now: number): BreakResult
+-- isRoot 由调用方提供：零号的扑咬冷却 ×RootBiteCooldownMultiplier（§6.2 / D2）。
+function Grab.onZombieHit(state: State, zombieId: string, now: number, isRoot: boolean?): BreakResult
 	local grab = state.grabs[zombieId]
 	if grab == nil then
 		return { broken = false }
@@ -168,11 +171,15 @@ function Grab.onZombieHit(state: State, zombieId: string, now: number): BreakRes
 	state.grabs[zombieId] = nil
 	local immuneUntil = now + state.config.GrabEscapeImmunitySeconds
 	state.biteImmuneUntil[grab.humanId] = immuneUntil
+	local cooldown = state.config.BiteCooldownSeconds
+	if isRoot == true then
+		cooldown *= state.config.RootBiteCooldownMultiplier
+	end
 	return {
 		broken = true,
 		humanId = grab.humanId,
 		immuneUntil = immuneUntil,
-		biteCooldownUntil = now + state.config.BiteCooldownSeconds,
+		biteCooldownUntil = now + cooldown,
 	}
 end
 

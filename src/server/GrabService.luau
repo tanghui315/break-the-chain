@@ -123,7 +123,9 @@ end
 -- 枪械/近战/电击命中正在擒抱的丧尸：立即解除，人类获得防扑咬保护，丧尸进入扑咬冷却（§9A.6）。
 function GrabService.breakOnZombieHit(zombieId: string, now: number, breakWeapon: string): Grab.BreakResult
 	local startedAt = startedAtByZombie[zombieId]
-	local result = Grab.onZombieHit(state, zombieId, now)
+	-- §6.2 / D2：零号擒抱被解除后按倍率收取扑咬冷却。
+	local zombieRecord = PlayerStateService.get(zombieId)
+	local result = Grab.onZombieHit(state, zombieId, now, zombieRecord ~= nil and zombieRecord.isRoot == true)
 	if not result.broken then
 		return result
 	end

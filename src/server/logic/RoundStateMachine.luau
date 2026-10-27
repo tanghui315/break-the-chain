@@ -96,6 +96,8 @@ export type RoundEvent = {
 	ratio: number?,
 	seedIds: { string }?,
 	kind: string?,
+	requiredExtracted: number?,
+	incubationEndsAt: number?,
 }
 
 export type TickResult = {
@@ -114,6 +116,10 @@ export type Hooks = {
 	isInExtractionZone: (id: string) -> boolean,
 	canBeRelinkTarget: (id: string) -> boolean,
 	positionOf: ((id: string) -> unknown)?,
+	-- §9A.3：断联丧尸倒地/死亡期间不能重连；每个 tick 校验，不再是 ACTIVE 立即取消。
+	canRelinkActor: ((actorId: string) -> boolean)?,
+	-- §13.2：被擒抱中的人类不能进行撤离读条（“无感染打断”的镜像约束）。
+	isGrabbed: ((actorId: string) -> boolean)?,
 }
 
 type CureMeta = {
@@ -151,6 +157,12 @@ export type Round = {
 	unstableNotified: { [string]: number },
 	seedSlots: { SeedSlot },
 	previousSeeds: { [string]: boolean },
+	-- §5.4：撤离目标可达性修正后的活目标；初始等于 plan.tier.requiredExtracted。
+	requiredExtracted: number,
+	-- 可达性修正每局最多执行一次。
+	extractTargetAdjusted: boolean,
+	-- §6.1：PREPARE 结束前 3 秒的隔离突破预警只广播一次。
+	breachWarned: boolean,
 }
 
 local RoundStateMachine = {}
@@ -195,6 +207,10 @@ local EventName = table.freeze({
 	RelinkSucceeded = "RelinkSucceeded",
 	Cured = "Cured",
 	Anomaly = "Anomaly",
+	BreachWarning = "BreachWarning",
+	ExtractionTargetAdjusted = "ExtractionTargetAdjusted",
+	YouAreIncubating = "YouAreIncubating",
+	YouAreSource = "YouAreSource",
 })
 RoundStateMachine.EventName = EventName
 
@@ -320,11 +336,17 @@ local function startChannel(
 	return true
 end
 
-local function humanCandidates(round: Round): { string }
+-- §6.1：零号候选必须排除处于治愈保护期的参与者（受保护者不应被选为零号）。
+local function humanCandidates(round: Round, now: number): { string }
 	local candidates: { string } = {}
 	for _, id in participantList(round) do
 		local participant = InfectionGraph.getState(round.graph, id)
-		if participant ~= nil and participant.state == InfectionGraph.State.HUMAN then
+		local immuneUntil = if participant ~= nil then participant.curedImmuneUntil else nil
+		if
+			participant ~= nil
+			and participant.state == InfectionGraph.State.HUMAN
+			and not (immuneUntil ~= nil and immuneUntil > now)
+		then
 			table.insert(candidates, id)
 		end
 	end
@@ -355,7 +377,9 @@ local function pickCandidate(candidates: { string }, previousSeeds: { [string]: 
 	return candidates[candidateIndex], candidateIndex
 end
 
-local function emitOutbreakStarted(events: { RoundEvent }, at: number, seedIds: { string })
+-- §6.1 / §7.3：公开选出零号时给本人发私有提示。
+-- YouAreSource 告知“你是源头”，YouAreIncubating 附带尸变倒计时截止时刻。
+local function emitOutbreakStarted(round: Round, events: { RoundEvent }, at: number, seedIds: { string })
 	local started = newEvent(EventName.OutbreakStarted, SCOPE_PUBLIC, at)
 	started.count = #seedIds
 	started.seedIds = seedIds
@@ -364,13 +388,23 @@ local function emitOutbreakStarted(events: { RoundEvent }, at: number, seedIds: 
 		local turning = newEvent(EventName.InfectionTurning, SCOPE_PUBLIC, at)
 		turning.participantId = id
 		table.insert(events, turning)
+
+		local participant = InfectionGraph.getState(round.graph, id)
+		local source = newEvent(EventName.YouAreSource, SCOPE_PRIVATE, at)
+		source.participantId = id
+		table.insert(events, source)
+
+		local incubating = newEvent(EventName.YouAreIncubating, SCOPE_PRIVATE, at)
+		incubating.participantId = id
+		incubating.incubationEndsAt = if participant ~= nil then participant.incubationEndsAt else nil
+		table.insert(events, incubating)
 	end
 end
 
 -- PREPARE 结束时公开选零号（§6.1）。零号先进入公开尸变过渡（INCUBATING），不是立即丧尸。
 -- 返回 true 表示“应该有零号却一个也建不出来”，由 tick 以 OUTBREAK_FAILED 收尾。
 local function pickSeeds(round: Round, at: number, events: { RoundEvent }): boolean
-	local candidates = humanCandidates(round)
+	local candidates = humanCandidates(round, at)
 	local wanted = math.max(0, math.floor(round.plan.tier.seedCount))
 	local picked: { string } = {}
 
@@ -395,7 +429,7 @@ local function pickSeeds(round: Round, at: number, events: { RoundEvent }): bool
 	end
 
 	if #picked > 0 then
-		emitOutbreakStarted(events, at, picked)
+		emitOutbreakStarted(round, events, at, picked)
 	end
 	return wanted > 0 and #picked == 0
 end
@@ -415,7 +449,7 @@ end
 -- 某个零号槽位的零号在尸变过渡中离场：用同一槽位补选一名仍为 HUMAN 的参与者（§6.1）。
 -- 每个原始槽位只允许一次补选；补选也离场时由调用方以 OUTBREAK_FAILED 收尾。
 local function reselectSlot(round: Round, slot: SeedSlot, at: number, events: { RoundEvent }): boolean
-	local candidates = humanCandidates(round)
+	local candidates = humanCandidates(round, at)
 	local id = pickCandidate(candidates, round.previousSeeds, round.rng)
 	if id == nil then
 		return false
@@ -431,37 +465,54 @@ local function reselectSlot(round: Round, slot: SeedSlot, at: number, events: { 
 	slot.participantId = id
 	slot.replacementUsed = true
 	slot.status = SEED_TURNING
-	emitOutbreakStarted(events, at, { id })
+	emitOutbreakStarted(round, events, at, { id })
 	return true
 end
 
 -- OUTBREAK 期间维护零号槽位：已公开的槽位标记 STABLE；离场的槽位补选一次。
--- 返回 true 表示爆发无法继续，tick 应立即以 OUTBREAK_FAILED 结束本局。
+-- 补选失败时若已另有零号完成公开尸变（爆发实际已经发生），只丢弃该槽位而不判 OUTBREAK_FAILED；
+-- 全部槽位都无法维持爆发才返回 true，由 tick 以 OUTBREAK_FAILED 结束本局。
 local function serviceSeedSlots(round: Round, at: number, events: { RoundEvent }): boolean
 	if round.phase ~= PHASE_OUTBREAK then
 		return false
 	end
 
-	for _, slot in round.seedSlots do
+	local failed: { number } = {}
+	for index, slot in round.seedSlots do
 		if slot.status == SEED_TURNING then
 			local participant = InfectionGraph.getState(round.graph, slot.participantId)
-			if participant ~= nil and participant.isRoot and participant.seedId == slot.seedId then
-				if participant.state == InfectionGraph.State.INFECTED then
-					slot.status = SEED_STABLE
-				elseif participant.state ~= InfectionGraph.State.INCUBATING then
-					if slot.replacementUsed or not reselectSlot(round, slot, at, events) then
-						return true
-					end
-				end
-			else
-				if slot.replacementUsed or not reselectSlot(round, slot, at, events) then
-					return true
-				end
+			local alive = participant ~= nil and participant.isRoot and participant.seedId == slot.seedId
+			if participant ~= nil and alive and participant.state == InfectionGraph.State.INFECTED then
+				slot.status = SEED_STABLE
+			elseif
+				(participant == nil or not alive or participant.state ~= InfectionGraph.State.INCUBATING)
+				-- §6.1：每个槽位只重新选择一次。
+				and (slot.replacementUsed or not reselectSlot(round, slot, at, events))
+			then
+				table.insert(failed, index)
 			end
 		end
 	end
 
-	return false
+	if #failed == 0 then
+		return false
+	end
+
+	-- 爆发已经发生（至少一个槽位的零号稳定感染）：丢弃失败槽位，回合继续。
+	local anyStable = false
+	for _, slot in round.seedSlots do
+		if slot.status == SEED_STABLE then
+			anyStable = true
+			break
+		end
+	end
+	if anyStable then
+		for index = #failed, 1, -1 do
+			table.remove(round.seedSlots, failed[index])
+		end
+		return false
+	end
+	return true
 end
 
 -- 阶段推进：OUTBREAK 在所有零号完成公开尸变后进入 CONTEST；
@@ -603,6 +654,7 @@ local function commitRelink(
 		fail(Reason.TargetChanged)
 		return
 	end
+	local unstableEndsAtBefore = unstable.unstableEndsAt
 
 	local result = InfectionGraph.relink(round.graph, channel.actorId, meta.targetId, at, {
 		roundId = round.roundId,
@@ -618,7 +670,43 @@ local function commitRelink(
 	event.actorId = channel.actorId
 	event.targetId = meta.targetId
 	event.count = result.affectedInfected or 0
+	-- §22.2：relink_committed 的 secondsLeft 是断联窗口剩余，不是回合剩余；
+	-- 携带原截止时间供服务层换算（relink 后字段已被清空）。
+	event.unstableEndsAt = unstableEndsAtBefore
 	table.insert(events, event)
+end
+
+-- 前向声明：settleDueRelinks 需要在 ChannelTimer.tick 之前复用逐 tick 校验。
+local buildValidity: (round: Round, hooks: Hooks) -> (ChannelTimer.Channel) -> (boolean, string?)
+
+-- §11.4 同 tick 竞态：断联截止时间 <= 本 tick 且重连读条同时到期时，重连优先于过期结算。
+-- 在图 tick（过期处理）之前先把“本 tick 将累计满”的 RELINK 读条提交掉：
+-- 提交后断联者立即恢复 INFECTED，随后的过期扫描自然看不到他们。
+-- 有效性走与逐 tick 校验同一条 buildValidity；无效读条留给正常 ChannelTimer.tick 取消。
+local function settleDueRelinks(round: Round, at: number, hooks: Hooks, events: { RoundEvent })
+	local due: { ChannelTimer.Channel } = {}
+	for _, channel in ChannelTimer.active(round.channels) do
+		if channel.kind == KIND_RELINK then
+			local projected = channel.accumulated + math.max(0, at - channel.lastCheckedAt)
+			if projected >= channel.duration then
+				table.insert(due, channel)
+			end
+		end
+	end
+	if #due == 0 then
+		return
+	end
+
+	local isValid = buildValidity(round, hooks)
+	for _, channel in due do
+		local valid = isValid(channel)
+		if valid then
+			local removed = ChannelTimer.cancel(round.channels, channel.actorId, "COMPLETED")
+			if removed ~= nil then
+				commitRelink(round, removed, at, hooks, events)
+			end
+		end
+	end
 end
 
 local function commitExtract(round: Round, channel: ChannelTimer.Channel, at: number, events: { RoundEvent })
@@ -661,7 +749,7 @@ local function handleCompleted(
 end
 
 -- 每 tick 的服务端校验。读条元数据里保存开始时的 episode，任何身份漂移都按 TARGET_CHANGED 取消（§11.4）。
-local function buildValidity(round: Round, hooks: Hooks): (ChannelTimer.Channel) -> (boolean, string?)
+function buildValidity(round: Round, hooks: Hooks): (ChannelTimer.Channel) -> (boolean, string?)
 	return function(channel: ChannelTimer.Channel): (boolean, string?)
 		if round.phase == PHASE_RESULT then
 			return false, Reason.RoundOver
@@ -715,6 +803,11 @@ local function buildValidity(round: Round, hooks: Hooks): (ChannelTimer.Channel)
 			if not hooks.canBeRelinkTarget(meta.targetId) then
 				return false, Reason.TargetInvalid
 			end
+			-- §9A.3：断联丧尸倒地/死亡期间不能重连；不再 ACTIVE 立即取消。
+			local canRelink = hooks.canRelinkActor
+			if canRelink ~= nil and not canRelink(channel.actorId) then
+				return false, "NOT_ACTIVE"
+			end
 			if not hooks.inRange(channel.actorId, meta.targetId, round.config.Greybox.RelinkRange) then
 				return false, Reason.OutOfRange
 			end
@@ -726,6 +819,11 @@ local function buildValidity(round: Round, hooks: Hooks): (ChannelTimer.Channel)
 			local actor = InfectionGraph.getState(round.graph, channel.actorId)
 			if actor == nil or actor.state ~= InfectionGraph.State.HUMAN then
 				return false, Reason.ActorChanged
+			end
+			-- §13.2：被擒抱中的人类不能撤离（与“无感染打断”一致）。
+			local isGrabbed = hooks.isGrabbed
+			if isGrabbed ~= nil and isGrabbed(channel.actorId) then
+				return false, "GRABBED"
 			end
 			if not hooks.isInExtractionZone(channel.actorId) then
 				return false, Reason.OutOfRange
@@ -743,6 +841,7 @@ local function autoStartExtraction(round: Round, at: number, hooks: Hooks)
 	if round.phase ~= PHASE_EXTRACTION then
 		return
 	end
+	local isGrabbed = hooks.isGrabbed
 	for _, id in participantList(round) do
 		local participant = InfectionGraph.getState(round.graph, id)
 		if
@@ -750,6 +849,7 @@ local function autoStartExtraction(round: Round, at: number, hooks: Hooks)
 			and participant.state == InfectionGraph.State.HUMAN
 			and hooks.isInExtractionZone(id)
 			and ChannelTimer.get(round.channels, id) == nil
+			and not (isGrabbed ~= nil and isGrabbed(id))
 		then
 			ChannelTimer.start(round.channels, id, KIND_EXTRACT, nil, at, round.config.Greybox.ExtractHoldSeconds)
 		end
@@ -880,6 +980,9 @@ function RoundStateMachine.new(
 		unstableNotified = {},
 		seedSlots = {},
 		previousSeeds = previousSeeds,
+		requiredExtracted = plan.tier.requiredExtracted,
+		extractTargetAdjusted = false,
+		breachWarned = false,
 	}
 end
 
@@ -893,8 +996,21 @@ function RoundStateMachine.tick(round: Round, now: number, hooks: Hooks): TickRe
 	local at = currentTime(round, now)
 	round.now = at
 
+	-- §6.1：PREPARE 结束前 3 秒广播一次“隔离突破”预警（公开，只带爆发开始时刻）。
+	if round.phase == PHASE_PREPARE and not round.breachWarned then
+		local phaseEndsAt = round.phaseEndsAt
+		if phaseEndsAt ~= nil and at >= phaseEndsAt - 3 then
+			round.breachWarned = true
+			local warning = newEvent(EventName.BreachWarning, SCOPE_PUBLIC, at)
+			warning.phase = PHASE_OUTBREAK
+			table.insert(events, warning)
+		end
+	end
+
 	local outbreakFailed = startOutbreak(round, at, events)
 	if not outbreakFailed then
+		-- §11.4：先提交本 tick 到期的重连，再做断联过期结算，同 tick 竞态由重连胜出。
+		settleDueRelinks(round, at, hooks, events)
 		applyReveals(round, at, hooks, events)
 		outbreakFailed = serviceSeedSlots(round, at, events)
 	end
@@ -920,6 +1036,38 @@ function RoundStateMachine.tick(round: Round, now: number, hooks: Hooks): TickRe
 	emitUnstableNotices(round, at, events)
 	emitCureProgress(round, at, events)
 
+	-- §5.4 撤离目标可达性修正：还能撤离的人数已不足以达成原目标时，把目标降到可达值。
+	-- 每局最多执行一次；目标只降不升，且至少为 1。可撤离人数 = 仍在局内的人类、尸变中、断联
+	-- 以及可被治愈的普通丧尸（零号不可治愈）。感染本身不减少这个数，只有离局会触发修正。
+	if not round.extractTargetAdjusted then
+		local remainingCapacity = 0
+		for _, id in participantList(round) do
+			local participant = InfectionGraph.getState(round.graph, id)
+			if participant ~= nil then
+				local state = participant.state
+				if
+					state == InfectionGraph.State.HUMAN
+					or state == InfectionGraph.State.INCUBATING
+					or state == InfectionGraph.State.UNSTABLE
+					or (state == InfectionGraph.State.INFECTED and not participant.isRoot)
+				then
+					remainingCapacity += 1
+				end
+			end
+		end
+		if round.requiredExtracted - round.extractedCount > remainingCapacity then
+			round.extractTargetAdjusted = true
+			local adjusted =
+				math.max(1, math.min(round.plan.tier.requiredExtracted, round.extractedCount + remainingCapacity))
+			if adjusted < round.requiredExtracted then
+				round.requiredExtracted = adjusted
+				local event = newEvent(EventName.ExtractionTargetAdjusted, SCOPE_PUBLIC, at)
+				event.requiredExtracted = adjusted
+				table.insert(events, event)
+			end
+		end
+	end
+
 	local publicCounts = InfectionGraph.publicCounts(round.graph)
 	local verdict = WinEvaluator.evaluate(round.config, {
 		humans = publicCounts.humans,
@@ -927,7 +1075,7 @@ function RoundStateMachine.tick(round: Round, now: number, hooks: Hooks): TickRe
 		infected = publicCounts.infected,
 		unstable = publicCounts.unstable,
 		extracted = round.extractedCount,
-		requiredExtracted = round.plan.tier.requiredExtracted,
+		requiredExtracted = round.requiredExtracted,
 		timeUp = at >= round.roundEndsAt,
 		-- 遏制复核只在 CONTEST / EXTRACTION 累计：OUTBREAK 的结局由零号选择/补选流程决定，
 		-- 否则零号离场后的空窗会让人类在开局白拿遏制胜利。
@@ -964,6 +1112,13 @@ function RoundStateMachine.onBite(round: Round, attackerId: string, targetId: st
 	local event = newEvent(EventName.InfectionTurning, SCOPE_PUBLIC, at)
 	event.participantId = targetId
 	table.insert(events, event)
+
+	-- §7.3 / §20.7：本人收到私有尸变倒计时提示。
+	local target = InfectionGraph.getState(round.graph, targetId)
+	local incubating = newEvent(EventName.YouAreIncubating, SCOPE_PRIVATE, at)
+	incubating.participantId = targetId
+	incubating.incubationEndsAt = if target ~= nil then target.incubationEndsAt else nil
+	table.insert(events, incubating)
 	return { ok = true, events = events }
 end
 

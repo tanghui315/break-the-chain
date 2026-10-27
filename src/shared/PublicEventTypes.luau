@@ -15,6 +15,10 @@ PublicEventTypes.Public = table.freeze({
 	RoundResult = "RoundResult",
 	-- §9A.4：手枪开火的公开噪声来源（位置已按 4 studs 取整）
 	GunshotFired = "GunshotFired",
+	-- §6.1：PREPARE 结束前 3 秒的隔离突破预警（不含任何秘密信息）。
+	BreachWarning = "BreachWarning",
+	-- §5.4：撤离目标可达性修正后的新阈值（公开，本来就是 HUD 显示的 x/y）。
+	ExtractionTargetAdjusted = "ExtractionTargetAdjusted",
 })
 
 PublicEventTypes.Private = table.freeze({
@@ -28,6 +32,8 @@ PublicEventTypes.Private = table.freeze({
 	Knockback = "Knockback",
 	YouAreIncubating = "YouAreIncubating",
 	YouAreUnstable = "YouAreUnstable",
+	-- §6.1：零号本人收到“你是源头”的私有提示（公开身份但私有告知）。
+	YouAreSource = "YouAreSource",
 	ScannerResults = "ScannerResults",
 	CureChannelProgress = "CureChannelProgress",
 	-- Gate A-2b：所有读条的统一进度/取消（CURE / RELINK / EXTRACT），只含 kind 与时间比例。

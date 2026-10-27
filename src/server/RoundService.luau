@@ -59,6 +59,9 @@ type Runtime = {
 	lastTreeSnapshotAt: number,
 	lastInvariantAt: number,
 	exitOpen: boolean,
+	-- §22.2：本局公开 infected+unstable 峰值与参与者数（round_ended 埋点用）。
+	infectionPeak: number,
+	participantCount: number,
 }
 
 local RESULT_DISPLAY_SECONDS = 8
@@ -83,6 +86,8 @@ local randomGenerator = Random.new()
 local rateLimiter = RateLimiter.new(ACTIONS_PER_SECOND, ACTIONS_PER_SECOND)
 -- §6.1：上一局零号在本局被优先跳过；跨局保留，清理回合时不重置。
 local previousSeedIds: { string } = {}
+-- §4.1 / §5.2：上一局 RESULT 时刻；nil 表示服务器还没有跑过任何一局（需要 WAITING 大厅）。
+local lastRoundEndedAt: number? = nil
 
 local requestAction: RemoteEvent? = nil
 local publicEvent: RemoteEvent? = nil
@@ -106,17 +111,27 @@ local function telemetryValue(value: any): string
 end
 
 -- §22.2：埋点只留在服务端日志；允许包含拓扑摘要（永不发给客户端）。
+-- 每条自动带 roundId / serverTimestamp / buildVersion，调用方只需补业务字段。
 local function telemetry(eventName: string, fields: { [string]: any }?)
-	local parts: { string } = { "[Telemetry]", eventName }
+	local rt = runtime
+	local merged: { [string]: any } = {
+		roundId = if rt ~= nil then rt.round.roundId else "none",
+		serverTimestamp = math.floor(serverNow() + 0.5),
+		buildVersion = BalanceConfig.Version,
+	}
 	if fields ~= nil then
-		local keys: { string } = {}
-		for key in fields do
-			table.insert(keys, key)
+		for key, value in fields do
+			merged[key] = value
 		end
-		table.sort(keys)
-		for _, key in keys do
-			table.insert(parts, `{key}={telemetryValue(fields[key])}`)
-		end
+	end
+	local parts: { string } = { "[Telemetry]", eventName }
+	local keys: { string } = {}
+	for key in merged do
+		table.insert(keys, key)
+	end
+	table.sort(keys)
+	for _, key in keys do
+		table.insert(parts, `{key}={telemetryValue(merged[key])}`)
 	end
 	print(table.concat(parts, " "))
 end
@@ -210,7 +225,8 @@ end
 -- ---------------------------------------------------------------------------
 
 local function requiredExtracted(rt: Runtime): number
-	return rt.round.plan.tier.requiredExtracted
+	-- §5.4：可达性修正后使用活的目标值；未修正时等于 plan.tier.requiredExtracted。
+	return rt.round.requiredExtracted
 end
 
 local function phaseEndsAtFor(rt: Runtime): number?
@@ -282,6 +298,14 @@ local function makeHooks(): RoundStateMachine.Hooks
 		canBeRelinkTarget = canBeRelinkTarget,
 		positionOf = function(participantId: string): unknown
 			return rootPositionOf(participantId)
+		end,
+		-- §9A.3：断联丧尸倒地/死亡/电击中不能重连。
+		canRelinkActor = function(actorId: string): boolean
+			return ZombieCombatService.stateOf(actorId) == "ACTIVE"
+		end,
+		-- §13.2：被擒抱中的人类不能撤离。
+		isGrabbed = function(actorId: string): boolean
+			return GrabService.isGrabbed(actorId)
 		end,
 	}
 end
@@ -447,6 +471,8 @@ local function transitionTo(
 		end
 		PlayerStateService.setState(participantId, "EXTRACTED")
 		PlayerStateService.setRoot(participantId, false)
+		-- §13.2：撤离成功立刻解除涉及此人的擒抱，避免丧尸保持冻结或人类被锁在原地。
+		GrabService.removeParticipant(participantId)
 		hideOutOfPlay(participantId)
 	elseif desired == "SPECTATOR" then
 		PlayerStateService.setState(participantId, "SPECTATOR")
@@ -565,6 +591,14 @@ local function onPublicEvent(rt: Runtime, event: RoundStateMachine.RoundEvent, n
 					seedMethod = BalanceConfig.SeedMethod,
 				})
 			end
+			if eventType == RoundStateMachine.EventName.InfectionRevealed then
+				local participant = InfectionGraph.getState(rt.round.graph, participantId)
+				telemetry("infection_revealed", {
+					participantId = participantId,
+					isRoot = participant ~= nil and participant.isRoot == true,
+					elapsedSec = string.format("%.1f", math.max(0, now - rt.round.startedAt)),
+				})
+			end
 		end
 	elseif eventType == RoundStateMachine.EventName.ChainCutNearby then
 		local count = event.count or 0
@@ -576,6 +610,20 @@ local function onPublicEvent(rt: Runtime, event: RoundStateMachine.RoundEvent, n
 	elseif eventType == RoundStateMachine.EventName.ExtractionOpened then
 		setExitOpen(rt, true)
 		broadcast(PublicEventTypes.Public.ExtractionOpened, {})
+	elseif eventType == RoundStateMachine.EventName.BreachWarning then
+		broadcast(PublicEventTypes.Public.BreachWarning, {
+			outbreakAt = event.at,
+		})
+	elseif eventType == RoundStateMachine.EventName.ExtractionTargetAdjusted then
+		broadcast(PublicEventTypes.Public.ExtractionTargetAdjusted, {
+			requiredExtracted = event.requiredExtracted,
+			extracted = rt.round.extractedCount,
+		})
+		telemetry("extraction_target_adjusted", {
+			requiredExtracted = event.requiredExtracted or requiredExtracted(rt),
+			extracted = rt.round.extractedCount,
+			elapsedSec = string.format("%.1f", math.max(0, now - rt.round.startedAt)),
+		})
 	elseif eventType == RoundStateMachine.EventName.Extracted then
 		local participantId = event.participantId
 		if participantId ~= nil then
@@ -599,11 +647,13 @@ local function onPublicEvent(rt: Runtime, event: RoundStateMachine.RoundEvent, n
 			winner = event.winner or rt.round.winner,
 			reason = event.reason or "NONE",
 			duration = string.format("%.1f", math.max(0, now - rt.round.startedAt)),
+			N = rt.participantCount,
+			infectionPeak = rt.infectionPeak,
 		})
 	end
 end
 
-local function onPrivateEvent(rt: Runtime, event: RoundStateMachine.RoundEvent, now: number)
+local function onPrivateEvent(_rt: Runtime, event: RoundStateMachine.RoundEvent, now: number)
 	local eventType = event.type
 	-- CureChannelProgress 由 sendChannelProgress 统一以 ChannelProgress 发送；这里忽略纯逻辑的旧事件名。
 
@@ -628,9 +678,14 @@ local function onPrivateEvent(rt: Runtime, event: RoundStateMachine.RoundEvent, 
 		if participantId ~= nil then
 			firePrivate(participantId, PublicEventTypes.Private.RelinkSucceeded, { count = count })
 		end
+		-- §22.2：secondsLeft 是断联者本人 8 秒窗口剩余，而不是回合剩余。
+		local windowLeft = 0
+		if event.unstableEndsAt ~= nil then
+			windowLeft = math.max(0, event.unstableEndsAt - now)
+		end
 		telemetry("relink_committed", {
 			relinkedSubtreeCount = count,
-			secondsLeft = string.format("%.1f", math.max(0, rt.round.roundEndsAt - now)),
+			secondsLeft = string.format("%.1f", windowLeft),
 		})
 	elseif eventType == RoundStateMachine.EventName.Cured then
 		local actorId = event.actorId
@@ -647,6 +702,29 @@ local function onPrivateEvent(rt: Runtime, event: RoundStateMachine.RoundEvent, 
 			branchImpactBefore = event.affectedInfected or 0,
 			unstableCount = event.affectedInfected or 0,
 		})
+		-- §22.7：倒地/电击中的目标被治愈时记录战斗状态（DOWNED/STUNNED 才有意义）。
+		if targetId ~= nil then
+			local combatState = ZombieCombatService.publicStateOf(targetId, now)
+			if combatState == "DOWNED" or combatState == "STUNNED" then
+				telemetry("downed_cured", {
+					target = targetId,
+					targetCombatState = combatState,
+					branchImpactBefore = event.affectedInfected or 0,
+				})
+			end
+		end
+	elseif eventType == RoundStateMachine.EventName.YouAreSource then
+		local participantId = event.participantId
+		if participantId ~= nil then
+			firePrivate(participantId, PublicEventTypes.Private.YouAreSource, {})
+		end
+	elseif eventType == RoundStateMachine.EventName.YouAreIncubating then
+		local participantId = event.participantId
+		if participantId ~= nil then
+			firePrivate(participantId, PublicEventTypes.Private.YouAreIncubating, {
+				incubationEndsAt = event.incubationEndsAt,
+			})
+		end
 	elseif eventType == RoundStateMachine.EventName.Anomaly then
 		telemetry("round_error", {
 			invariantName = event.kind or "ANOMALY",
@@ -1029,10 +1107,18 @@ local function handlePlayerRemoving(player: Player)
 	local rt = runtime
 	if rt ~= nil then
 		local position: unknown = rootPositionOf(id)
+		local exitState = InfectionGraph.getState(rt.round.graph, id)
 		local result = RoundStateMachine.removeParticipant(rt.round, id, leavingNow, position)
 		if result.ok then
 			applyEvents(rt, result.events, leavingNow)
 		end
+		-- §22.2：中途退出时的身份与方式；EXTRACTED 玩家离场不算“流失”。
+		telemetry("player_round_exit", {
+			participantId = id,
+			state = if exitState ~= nil then exitState.state else "UNKNOWN",
+			elapsedSec = string.format("%.1f", math.max(0, leavingNow - rt.round.startedAt)),
+			kind = participant.kind,
+		})
 		rt.states[id] = nil
 		rt.spawnIndex[id] = nil
 		rt.respawning[id] = nil
@@ -1137,6 +1223,10 @@ local function tickRuntime(rt: Runtime): boolean
 		CombatService.sample(now)
 		local hooks = makeHooks()
 		applyEvents(rt, RoundStateMachine.tick(rt.round, now, hooks).events, now)
+
+		-- §22.2：公开 infected+unstable 峰值（round_ended 埋点用）。
+		local counts = InfectionGraph.publicCounts(rt.round.graph)
+		rt.infectionPeak = math.max(rt.infectionPeak, counts.infected + counts.unstable)
 
 		for _, grab in GrabService.tick(now) do
 			local result = RoundStateMachine.onBite(rt.round, grab.zombieId, grab.humanId, now)
@@ -1321,6 +1411,8 @@ local function startRound(snapshot: { Player })
 		lastTreeSnapshotAt = startedAt,
 		lastInvariantAt = startedAt,
 		exitOpen = false,
+		infectionPeak = 0,
+		participantCount = #participantIds,
 	}
 	runtime = rt
 
@@ -1337,6 +1429,7 @@ local function startRound(snapshot: { Player })
 		seedCount = plan.tier.seedCount,
 		roundDuration = plan.tier.roundSeconds,
 		mapVariant = "GREYBOX_SMALL",
+		-- roundId/serverTimestamp/buildVersion 由 telemetry() 自动补齐
 	})
 	if plan.botCount > 0 then
 		telemetry("bot_fill", { realCount = plan.realCount, botCount = plan.botCount })
@@ -1612,24 +1705,67 @@ local function installDevHook()
 	hook.Parent = ServerStorage
 end
 
+-- §4.1 / §5.2 / §20.9：服务器还没有任何一局时，先让玩家在 WAITING 大厅聚齐。
+-- LobbyWaitSeconds 内继续吸纳新玩家；满 24 人提前开局。正式局之间（RESULT 之后）立即重开，
+-- 不再插入等待。Studio 可用 ServerStorage.BTC_DebugLobbySeconds 缩短等待。
+local function lobbyWait(): { Player }
+	local waitSeconds = BalanceConfig.LobbyWaitSeconds
+	if RunService:IsStudio() then
+		local override = game:GetService("ServerStorage"):GetAttribute("BTC_DebugLobbySeconds")
+		if type(override) == "number" and override >= 0 then
+			waitSeconds = override
+		end
+	end
+	if waitSeconds <= 0 then
+		return ParticipantService.onlinePlayers()
+	end
+
+	local endsAt = serverNow() + waitSeconds
+	broadcast(PublicEventTypes.Public.RoundPhaseChanged, {
+		phase = "WAITING",
+		phaseEndsAt = endsAt,
+	})
+	while serverNow() < endsAt do
+		task.wait(0.5)
+		local online = ParticipantService.onlinePlayers()
+		if #online == 0 then
+			-- 最后一名真人离开：放弃本次等待，回到主循环的空转分支。
+			return online
+		end
+		if #online >= BalanceConfig.MaxPlayers then
+			break
+		end
+	end
+	return ParticipantService.onlinePlayers()
+end
+
 local function mainLoop()
 	while true do
 		local snapshot = ParticipantService.onlinePlayers()
 		if #snapshot == 0 then
+			-- 无人：清掉所有回合残留，并把 lastRoundEndedAt 置回“未开局”，
+			-- 让下一位真人进来时重新进入 WAITING 大厅。
+			lastRoundEndedAt = nil
 			cleanupRound()
 			task.wait(1)
 		else
-			local ok, err = pcall(function()
-				startRound(snapshot)
-				return nil
-			end)
-			if not ok then
-				telemetry("round_error", {
-					invariantName = "ROUND_EXCEPTION",
-					severity = "critical",
-					detail = tostring(err),
-				})
-				warn(`[BreakTheChain] round error: {tostring(err)}`)
+			if lastRoundEndedAt == nil then
+				snapshot = lobbyWait()
+			end
+			if #snapshot > 0 then
+				local ok, err = pcall(function()
+					startRound(snapshot)
+					return nil
+				end)
+				if not ok then
+					telemetry("round_error", {
+						invariantName = "ROUND_EXCEPTION",
+						severity = "critical",
+						detail = tostring(err),
+					})
+					warn(`[BreakTheChain] round error: {tostring(err)}`)
+				end
+				lastRoundEndedAt = serverNow()
 			end
 			cleanupRound()
 			task.wait(1)

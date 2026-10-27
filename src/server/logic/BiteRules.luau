@@ -10,6 +10,7 @@ export type PlayerState = "HUMAN" | "INCUBATING" | "INFECTED" | "UNSTABLE" | "EX
 export type Config = {
 	BiteWindupSeconds: number,
 	BiteCooldownSeconds: number,
+	RootBiteCooldownMultiplier: number,
 	Greybox: {
 		BiteMissRecoverySeconds: number,
 		LungeSeconds: number,
@@ -27,6 +28,8 @@ export type AttackerRecord = {
 	biteCooldownUntil: number?,
 	windupStartedAt: number?,
 	windupConsumed: boolean,
+	-- §6.2 / D2：零号的扑咬冷却 ×RootBiteCooldownMultiplier。
+	isRoot: boolean?,
 }
 
 export type TargetRecord = {
@@ -77,6 +80,14 @@ BiteRules.Reason = Reason
 
 local EPSILON = 1e-9
 
+-- §6.2 / D2：攻击者是零号时扑咬冷却 ×RootBiteCooldownMultiplier，其余参与者按原值。
+local function biteCooldownSeconds(config: Config, attacker: AttackerRecord): number
+	if attacker.isRoot == true then
+		return config.BiteCooldownSeconds * config.RootBiteCooldownMultiplier
+	end
+	return config.BiteCooldownSeconds
+end
+
 local function horizontalDistance(a: Vec3, b: Vec3): number
 	local dx = a.x - b.x
 	local dz = a.z - b.z
@@ -111,7 +122,7 @@ function BiteRules.startBite(config: Config, attacker: AttackerRecord, now: numb
 			return false, Reason.WINDUP_ACTIVE
 		end
 		-- 过期且从未提交的前摇（丢包/取消/目标离开）：按窗口结束时刻补收冷却，避免无成本重试。
-		attacker.biteCooldownUntil = windupStartedAt + latest + config.BiteCooldownSeconds
+		attacker.biteCooldownUntil = windupStartedAt + latest + biteCooldownSeconds(config, attacker)
 		attacker.windupStartedAt = nil
 		attacker.windupConsumed = true
 	end
@@ -154,7 +165,7 @@ function BiteRules.commitBite(config: Config, input: CommitInput): CommitResult
 
 	local rewind = math.clamp(input.attackerPingSeconds, 0, config.Greybox.MaxRewindSeconds)
 	local sampled = input.sampleTarget(input.now - rewind)
-	local cooldownUntil = input.now + config.BiteCooldownSeconds
+	local cooldownUntil = input.now + biteCooldownSeconds(config, attacker)
 	local recoverUntil = input.now + config.Greybox.BiteMissRecoverySeconds
 
 	-- 采样器返回 nil 时无法验证回溯位置，按未命中处理并正常进入冷却。

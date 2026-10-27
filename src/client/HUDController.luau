@@ -58,6 +58,8 @@ local gunshotSeenAt = -math.huge
 
 -- Gate A-2b 的私有信息
 local unstableEndsAt: number? = nil
+-- §7.3 / §6.1：本人尸变倒计时；“你是源头”用一次性 feed 通知即可。
+local incubationEndsAt: number? = nil
 local relinkHintDirection: Vector3? = nil
 local relinkHintDistance = -1
 local relinkHintAt = -math.huge
@@ -215,6 +217,15 @@ local function handlePublicEvent(eventType: string, payload: any)
 	elseif eventType == PublicEventTypes.Public.ExtractionOpened then
 		exitBannerUntil = Workspace:GetServerTimeNow() + 6
 		feed("EXTRACTION OPEN — REACH THE EXIT", VisualTokens.Color.Exit)
+	elseif eventType == PublicEventTypes.Public.BreachWarning then
+		-- §6.1：PREPARE 倒计时 3 秒的隔离突破预警。
+		feed("QUARANTINE BREACH IN 3", VisualTokens.Color.Zombie)
+	elseif eventType == PublicEventTypes.Public.ExtractionTargetAdjusted and typeof(payload) == "table" then
+		-- §5.4：目标被可达性压低后，同步 HUD 的 x/y 并让玩家知道发生了什么。
+		if type(payload.requiredExtracted) == "number" then
+			requiredExtracted = math.max(0, math.floor(payload.requiredExtracted))
+		end
+		feed(string.format("EVAC TARGET ADJUSTED — %d REQUIRED", requiredExtracted), VisualTokens.Color.Exit)
 	elseif eventType == PublicEventTypes.Public.Extracted and typeof(payload) == "table" then
 		if type(payload.extracted) == "number" then
 			extractedCount = math.max(0, math.floor(payload.extracted))
@@ -243,6 +254,14 @@ local function handlePrivateEvent(eventType: string, payload: any)
 		if type(payload.unstableEndsAt) == "number" then
 			unstableEndsAt = payload.unstableEndsAt
 		end
+	elseif eventType == PublicEventTypes.Private.YouAreIncubating and typeof(payload) == "table" then
+		-- §7.3 / §20.7：本人尸变倒计时；与 YouAreUnstable 的计时器共存。
+		if type(payload.incubationEndsAt) == "number" then
+			incubationEndsAt = payload.incubationEndsAt
+		end
+	elseif eventType == PublicEventTypes.Private.YouAreSource then
+		-- §6.1：公开身份但私有告知，让零号知道自己会被优先猎杀。
+		feed("YOU ARE THE SOURCE", VisualTokens.Color.Zombie)
 	elseif eventType == PublicEventTypes.Private.RelinkHint and typeof(payload) == "table" then
 		if typeof(payload.direction) == "Vector3" and type(payload.distance) == "number" then
 			relinkHintDirection = payload.direction
@@ -358,7 +377,8 @@ local function refreshTags()
 				local billboard = Instance.new("BillboardGui")
 				billboard.Name = "BTC_PublicTag"
 				billboard.Size = UDim2.fromOffset(180, 52)
-				billboard.StudsOffset = Vector3.new(0, 3.4, 0)
+				-- §6.1：SOURCE 标签抬高到 5.2 studs，避免与撤离区门框上方的 EXIT 牌重叠。
+				billboard.StudsOffset = Vector3.new(0, 5.2, 0)
 				billboard.AlwaysOnTop = true
 				billboard.MaxDistance = 90
 				billboard.Parent = child
@@ -472,6 +492,13 @@ local function refreshState()
 
 	local now = Workspace:GetServerTimeNow()
 	local text, color = stateStyle(state)
+	-- §7.3：本人尸变期间给出倒计时，避免被咬后毫无反馈。
+	if state == "INCUBATING" and incubationEndsAt ~= nil then
+		text = string.format("INFECTED — TURNING IN %ds", math.max(0, math.ceil(incubationEndsAt - now)))
+	end
+	if state ~= "INCUBATING" then
+		incubationEndsAt = nil
+	end
 	if state == "INFECTED" and combat == "DEAD" then
 		local respawnAt = if character ~= nil then character:GetAttribute(Constants.Attribute.RespawnAt) else nil
 		if type(respawnAt) == "number" then
@@ -542,7 +569,8 @@ local function refreshState()
 		elseif selected == "Taser" then
 			ammoLabel.Text = string.format("CHARGES %d", controller.getTaserCharges())
 		else
-			ammoLabel.Text = "MELEE"
+			-- 武器名已经是 MELEE，弹药位留空避免“MELEE MELEE”的重复显示。
+			ammoLabel.Text = "—"
 		end
 	else
 		weaponLabel.Visible = false

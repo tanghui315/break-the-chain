@@ -61,6 +61,10 @@ local ALLOWED_KEYS: { [string]: { [string]: boolean } } = {
 	ExtractionOpened = {},
 	Extracted = { participantId = true },
 	RoundResult = { winner = true, reason = true },
+	-- §6.1：隔离突破预警只带即将进入的阶段名，不含任何拓扑。
+	BreachWarning = { phase = true },
+	-- §5.4：撤离目标可达性修正只带新阈值。
+	ExtractionTargetAdjusted = { requiredExtracted = true },
 }
 
 local FORBIDDEN_KEY_PARTS = {
