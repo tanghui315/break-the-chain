@@ -16,6 +16,7 @@ export type Config = {
 	RootRallyMinHumanDistance: number,
 	RootRallyMoveTolerance: number,
 	RespawnMinDistanceFromExtraction: number,
+	RootRallyForwardMaxDistance: number,
 }
 
 export type Channel = {
@@ -198,6 +199,38 @@ function Hive.cancelRally(state: State, rootId: string, now: number): boolean
 	root.channel = nil
 	root.rallyReadyAt = math.max(root.rallyReadyAt, now + state.config.RootRallyInterruptCooldownSeconds)
 	return true
+end
+
+-- 前线复活点（EXP-09 第二轮）：在候选点（地图路点，保证不压墙）中选离被标记者最近的一个，
+-- 要求距被标记者 ≤ RootRallyForwardMaxDistance、距所有人类 ≥ RootRallyMinHumanDistance，
+-- 撤离开启时距撤离区 ≥ RespawnMinDistanceFromExtraction。没有合格点返回 nil（调用方退回信标）。
+function Hive.pickForwardSpawn(
+	config: Config,
+	candidates: { Vec3 },
+	target: Vec3,
+	humans: { Vec3 },
+	extraction: Vec3?
+): Vec3?
+	local best: Vec3? = nil
+	local bestDistance = math.huge
+	for _, point in candidates do
+		local toTarget = horizontalDistance(point, target)
+		if toTarget <= config.RootRallyForwardMaxDistance and toTarget < bestDistance then
+			local clear = extraction == nil
+				or horizontalDistance(point, extraction) >= config.RespawnMinDistanceFromExtraction
+			for _, human in humans do
+				if horizontalDistance(point, human) < config.RootRallyMinHumanDistance then
+					clear = false
+					break
+				end
+			end
+			if clear then
+				best = point
+				bestDistance = toTarget
+			end
+		end
+	end
+	return best
 end
 
 function Hive.beaconOf(state: State, rootId: string, now: number): Beacon?

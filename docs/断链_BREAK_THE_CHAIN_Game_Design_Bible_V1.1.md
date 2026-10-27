@@ -327,20 +327,21 @@ flowchart LR
 
 1. **源头标记（主动）**
    - 零号在 `RootMarkRange`（60 studs）内、地图几何视线畅通时，对一名 `HUMAN` / `INCUBATING` 参与者使用。
-   - 本树所有稳定丧尸在 `RootMarkSeconds`（6 秒）内隔墙看到该目标的轮廓；冷却 `RootMarkCooldownSeconds`（30 秒）。
+   - 本树所有稳定丧尸在 `RootMarkSeconds`（6 秒）内隔墙看到该目标的轮廓；冷却 `RootMarkCooldownSeconds`（20 秒；第一轮 30 秒时遭遇间隔只缩短 18%）。
    - 被标记者立即收到“你被源头盯上了”提示（反制：找掩体、拉开距离、靠近持枪队友）。
    - 只发送给被标记者与收到指令的丧尸，不全场广播（§17.6 泄密面：丧尸只能据此知道自己仍在树上）。
 2. **母巢集结（主动）**
    - 零号原地引导 `RootRallyChannelSeconds`（2 秒）；引导中被电击、倒地、擒抱目标被打断则失败并进入短冷却（10 秒）。
    - 成功后在原地立起全场可见的“母巢信标”，持续 `RootRallyBeaconSeconds`（20 秒），冷却 `RootRallyCooldownSeconds`（60 秒）。
    - 信标存在期间，本树稳定丧尸复活时改为在信标处复活（仍走正常死亡时长与复活保护，不缩短死亡时间）。
+   - **前线复活（第二轮）**：信标存在、且零号 `RootRallyForwardMarkSeconds`（15 秒）内标记过的目标仍是人类时，改在该目标附近的地图路点复活：距目标 ≤ `RootRallyForwardMaxDistance`（60 studs）、距所有人类 ≥ `RootRallyMinHumanDistance`（30 studs）、撤离开启后距撤离区 ≥ `RespawnMinDistanceFromExtraction`。找不到合格路点时仍在信标旁复活。埋点 `rally_respawn.mode = FORWARD | BEACON`。
    - 立起条件：最近人类距离 ≥ `RootRallyMinHumanDistance`（30 studs）；撤离开启后，距撤离区 ≥ `RespawnMinDistanceFromExtraction`。不满足时拒绝并提示原因。
    - 零号倒地或死亡时信标立即熄灭（反制：集中火力打倒零号来“拆信标”）。
 3. **护主警报（被动，第二批实现）**：零号被击倒或擒抱人类时，30 studs 内本树稳定丧尸获得“源头遇袭”提示与 4 秒 +15% 移速。不做减伤光环。
 
 **平衡护栏**
 - 不改变零号个人战斗数值；所有收益随断链减少，形成天然负反馈。
-- 技能覆盖时间合计 ≤ 30%：标记 6/30 秒，信标 20/60 秒。
+- 每项技能覆盖时间 ≤ 1/3：标记 6/20 秒（30%），信标 20/60 秒（33%）。第一轮的“合计 ≤ 30%”在冷却降到 20 秒后为 31.7%，改为按单项约束。
 - 新手说明写明三项能力及反制；瞄准零号仍提示“源头不可治愈”。
 
 **A/B 验收（Bot 8 人局，同地图同版本，各 ≥ 20 局）**

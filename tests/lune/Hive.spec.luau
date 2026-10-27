@@ -23,27 +23,25 @@ describe("源头标记", function()
 	it("默认关闭，数值与 GDB §6.4 一致", function()
 		expect(C.HiveAbilitiesEnabled).toBe(false)
 		expect(C.RootMarkSeconds).toBe(6)
-		expect(C.RootMarkCooldownSeconds).toBe(30)
+		expect(C.RootMarkCooldownSeconds).toBe(20)
 		expect(C.RootRallyBeaconSeconds).toBe(20)
 		expect(C.RootRallyCooldownSeconds).toBe(60)
-		-- 覆盖时间合计 ≤ 30%（各自占比之和的平均）
-		local coverage = (
-			C.RootMarkSeconds / C.RootMarkCooldownSeconds + C.RootRallyBeaconSeconds / C.RootRallyCooldownSeconds
-		) / 2
-		expect(coverage <= 0.3).toBe(true)
+		-- 第二轮护栏：每项技能覆盖时间 ≤ 1/3
+		expect(C.RootMarkSeconds / C.RootMarkCooldownSeconds <= 1 / 3).toBe(true)
+		expect(C.RootRallyBeaconSeconds / C.RootRallyCooldownSeconds <= 1 / 3 + 1e-9).toBe(true)
 	end)
 
-	it("标记持续 6 秒，冷却 30 秒内再次标记被拒", function()
+	it("标记持续 6 秒，冷却 20 秒内再次标记被拒", function()
 		local state = Hive.new(C)
 		local ok, reason = Hive.tryMark(state, "root", "h1", 10)
 		expect(ok).toBe(true)
 		expect(reason).toBe(Reason.OK)
 		expect(Hive.markOn(state, "h1", 15.9) ~= nil).toBe(true)
 		expect(Hive.markOn(state, "h1", 16) == nil).toBe(true)
-		local again, againReason = Hive.tryMark(state, "root", "h2", 39.9)
+		local again, againReason = Hive.tryMark(state, "root", "h2", 29.9)
 		expect(again).toBe(false)
 		expect(againReason).toBe(Reason.COOLDOWN)
-		expect((Hive.tryMark(state, "root", "h2", 40))).toBe(true)
+		expect((Hive.tryMark(state, "root", "h2", 30))).toBe(true)
 	end)
 
 	it("两名零号各自独立冷却", function()
@@ -138,6 +136,25 @@ describe("母巢集结", function()
 		state.roots["root"].rallyReadyAt = 0 -- 只测信标叠加，跳过冷却
 		local _, reason = Hive.startRally(state, "root", 5, v(0, 0), 100, nil)
 		expect(reason).toBe(Reason.BEACON_ACTIVE)
+	end)
+end)
+
+describe("前线复活点", function()
+	it("选距被标记者最近、且离所有人类 ≥ 30 的路点", function()
+		local candidates = { v(0, 0), v(35, 0), v(50, 0), v(200, 0) }
+		local target = v(0, 0)
+		-- 目标本人在 (0,0)：(0,0) 与 (25..) 内的点都太近，(35,0) 是最近的合格点
+		local picked = Hive.pickForwardSpawn(C, candidates, target, { target }, nil)
+		expect(picked ~= nil and picked.x == 35).toBe(true)
+		-- 另一名人类站在 (40,0)：(35,0) 与 (50,0) 都太近，(200,0) 超出 60 → 无结果
+		expect(Hive.pickForwardSpawn(C, candidates, target, { target, v(40, 0) }, nil) == nil).toBe(true)
+	end)
+
+	it("撤离开启时避开撤离区", function()
+		local candidates = { v(35, 0), v(-40, 0) }
+		local exit = v(60, 0)
+		local picked = Hive.pickForwardSpawn(C, candidates, v(0, 0), { v(0, 0) }, exit)
+		expect(picked ~= nil and picked.x == -40).toBe(true)
 	end)
 end)
 

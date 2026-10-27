@@ -36,6 +36,8 @@ local context: Context? = nil
 local state: Hive.State? = nil
 local beaconParts: { [string]: Instance } = {}
 local folder: Folder? = nil
+-- 每个零号最近一次成功标记（前线复活用）。
+local lastMarkByRoot: { [string]: { targetId: string, markedAt: number } } = {}
 
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Include
@@ -247,6 +249,7 @@ function HiveService.reset()
 		existing:Destroy()
 	end
 	folder = nil
+	table.clear(lastMarkByRoot)
 	context = nil
 	state = nil
 end
@@ -335,6 +338,7 @@ function HiveService.requestMark(rootId: string, now: number, notify: boolean): 
 		report("MARK", rootId, false, markReason, now, notify, nil)
 		return false, markReason
 	end
+	lastMarkByRoot[rootId] = { targetId = targetId, markedAt = now }
 	local receivers = treeMembers(ctx.graph, rootId)
 	for _, id in receivers do
 		ctx.firePrivate(id, PublicEventTypes.Private.HiveMark, {
@@ -472,22 +476,61 @@ function HiveService.respawnPositionFor(zombieId: string, now: number): Vector3?
 		return nil
 	end
 	local map = ActiveMap.get()
-	-- 在信标旁 3 studs 处出生，避免叠在立柱里。
-	local position = Vector3.new(beacon.position.x + 3, map.floorTopY + map.characterSpawnY, beacon.position.z)
-	local nearest = math.huge
+	local spawnY = map.floorTopY + map.characterSpawnY
+	local humans: { Hive.Vec3 } = {}
+	local humanParts: { BasePart } = {}
 	for _, id in InfectionGraph.participantIds(ctx.graph) do
 		local other = InfectionGraph.getState(ctx.graph, id)
 		local part = rootPart(id)
 		if other ~= nil and (other.state == "HUMAN" or other.state == "INCUBATING") and part ~= nil then
-			nearest = math.min(nearest, horizontalDistance(position, part.Position))
+			table.insert(humans, toVec(part.Position))
+			table.insert(humanParts, part)
 		end
+	end
+
+	-- 前线复活：本树最近 RootRallyForwardMarkSeconds 内标记过、仍是人类的目标附近的路点。
+	local mode = "BEACON"
+	local position: Vector3? = nil
+	local lastMark = lastMarkByRoot[rootId]
+	if lastMark ~= nil and now - lastMark.markedAt <= BalanceConfig.RootRallyForwardMarkSeconds then
+		local targetNode = InfectionGraph.getState(ctx.graph, lastMark.targetId)
+		local targetPart = rootPart(lastMark.targetId)
+		if
+			targetNode ~= nil
+			and (targetNode.state == "HUMAN" or targetNode.state == "INCUBATING")
+			and targetPart ~= nil
+		then
+			local candidates: { Hive.Vec3 } = {}
+			for _, waypoint in map.waypoints do
+				table.insert(candidates, waypoint.position)
+			end
+			local exit = ctx.activeExtractionCenter()
+			local picked = Hive.pickForwardSpawn(
+				BalanceConfig,
+				candidates,
+				toVec(targetPart.Position),
+				humans,
+				if exit ~= nil then toVec(exit) else nil
+			)
+			if picked ~= nil then
+				position = Vector3.new(picked.x, spawnY, picked.z)
+				mode = "FORWARD"
+			end
+		end
+	end
+	-- 退回信标：在信标旁 3 studs 处出生，避免叠在立柱里。
+	local spawnAt = position or Vector3.new(beacon.position.x + 3, spawnY, beacon.position.z)
+	local nearest = math.huge
+	for _, part in humanParts do
+		nearest = math.min(nearest, horizontalDistance(spawnAt, part.Position))
 	end
 	ctx.telemetry("rally_respawn", {
 		zombieId = zombieId,
 		rootId = rootId,
+		mode = mode,
 		nearestHumanDistance = if nearest == math.huge then "inf" else string.format("%.1f", nearest),
 	})
-	return position
+	return spawnAt
 end
 
 function HiveService.step(now: number)
