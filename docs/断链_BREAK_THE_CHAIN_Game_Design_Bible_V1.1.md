@@ -334,7 +334,7 @@ flowchart LR
    - 零号原地引导 `RootRallyChannelSeconds`（2 秒）；引导中被电击、倒地、擒抱目标被打断则失败并进入短冷却（10 秒）。
    - 成功后在原地立起全场可见的“母巢信标”，持续 `RootRallyBeaconSeconds`（20 秒），冷却 `RootRallyCooldownSeconds`（60 秒）。
    - 信标存在期间，本树稳定丧尸复活时改为在信标处复活（仍走正常死亡时长与复活保护，不缩短死亡时间）。
-   - **前线复活（第二轮）**：信标存在、且零号 `RootRallyForwardMarkSeconds`（15 秒）内标记过的目标仍是人类时，改在该目标附近的地图路点复活：距目标 ≤ `RootRallyForwardMaxDistance`（60 studs）、距所有人类 ≥ `RootRallyMinHumanDistance`（30 studs）、撤离开启后距撤离区 ≥ `RespawnMinDistanceFromExtraction`。找不到合格路点时仍在信标旁复活。埋点 `rally_respawn.mode = FORWARD | BEACON`。
+   - **前线复活（第二轮）**：信标存在、且零号 `RootRallyForwardMarkSeconds`（25 秒，覆盖一次倒地 + 死亡 + 复活约 13 秒）内标记过的目标仍是人类时，改在该目标附近的地图路点复活：距目标 ≤ `RootRallyForwardMaxDistance`（60 studs）、距所有人类 ≥ `RootRallyMinHumanDistance`（30 studs）、撤离开启后距撤离区 ≥ `RespawnMinDistanceFromExtraction`。找不到合格路点时仍在信标旁复活。埋点 `rally_respawn.mode = FORWARD | BEACON`。
    - 立起条件：最近人类距离 ≥ `RootRallyMinHumanDistance`（30 studs）；撤离开启后，距撤离区 ≥ `RespawnMinDistanceFromExtraction`。不满足时拒绝并提示原因。
    - 零号倒地或死亡时信标立即熄灭（反制：集中火力打倒零号来“拆信标”）。
 3. **护主警报（被动，第二批实现）**：零号被击倒或擒抱人类时，30 studs 内本树稳定丧尸获得“源头遇袭”提示与 4 秒 +15% 移速。不做减伤光环。

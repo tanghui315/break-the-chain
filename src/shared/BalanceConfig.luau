@@ -53,9 +53,9 @@ local BalanceConfig = {
 	RootRallyInterruptCooldownSeconds = 10,
 	RootRallyMinHumanDistance = 30,
 	RootRallyMoveTolerance = 3, -- 引导期间水平移动超过该距离视为打断
-	-- EXP-09 第二轮“前线复活”：信标存在且本树 15 秒内标记过人类时，本树死亡丧尸改在被标记者附近的路点复活
+	-- EXP-09 第二轮“前线复活”：信标存在且本树 25 秒内标记过人类时，本树死亡丧尸改在被标记者附近的路点复活
 	-- （路点距被标记者 ≤ 60、距所有人类 ≥ RootRallyMinHumanDistance；找不到时仍在信标旁）。
-	RootRallyForwardMarkSeconds = 15,
+	RootRallyForwardMarkSeconds = 25, -- 覆盖一次倒地+死亡+复活（约 13 秒）加引导时间
 	RootRallyForwardMaxDistance = 60,
 
 	-- 断联、治愈、撤离（§10、§11、§13）
