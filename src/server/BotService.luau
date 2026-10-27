@@ -9,6 +9,7 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local BalanceConfig = require(ReplicatedStorage.Shared.BalanceConfig)
+local ActiveMap = require(script.Parent.world.ActiveMap)
 local GreyboxLayout = require(script.Parent.world.GreyboxLayout)
 local WaypointRoute = require(script.Parent.logic.WaypointRoute)
 local CombatService = require(script.Parent.CombatService)
@@ -65,22 +66,38 @@ local NAV_GOAL_CHANGE_DISTANCE = 2
 local ais: { [string]: BotAI } = {}
 local spawnCursor = 0
 
-local waypointById: { [string]: GreyboxLayout.Waypoint } = {}
-local adjacency: { [string]: { string } } = {}
-local routeWaypoints: { WaypointRoute.Waypoint } = {}
-local routeEdges: { WaypointRoute.Edge } = {}
-for _, waypoint in GreyboxLayout.waypoints do
-	waypointById[waypoint.id] = waypoint
-	adjacency[waypoint.id] = {}
-	table.insert(routeWaypoints, {
-		id = waypoint.id,
-		position = { x = waypoint.position.x, z = waypoint.position.z },
-	})
-end
-for _, edge in GreyboxLayout.edges do
-	table.insert(adjacency[edge.a], edge.b)
-	table.insert(adjacency[edge.b], edge.a)
-	table.insert(routeEdges, { a = edge.a, b = edge.b })
+type RouteGraph = {
+	byId: { [string]: GreyboxLayout.Waypoint },
+	adjacency: { [string]: { string } },
+	waypoints: { WaypointRoute.Waypoint },
+	edges: { WaypointRoute.Edge },
+}
+
+-- 每张地图的路点图只建一次；换图后 get() 返回新布局，自动取到对应的图。
+local routeGraphs: { [GreyboxLayout.Layout]: RouteGraph } = {}
+
+local function routeGraph(): RouteGraph
+	local layout = ActiveMap.get()
+	local cached = routeGraphs[layout]
+	if cached ~= nil then
+		return cached
+	end
+	local graph: RouteGraph = { byId = {}, adjacency = {}, waypoints = {}, edges = {} }
+	for _, waypoint in layout.waypoints do
+		graph.byId[waypoint.id] = waypoint
+		graph.adjacency[waypoint.id] = {}
+		table.insert(graph.waypoints, {
+			id = waypoint.id,
+			position = { x = waypoint.position.x, z = waypoint.position.z },
+		})
+	end
+	for _, edge in layout.edges do
+		table.insert(graph.adjacency[edge.a], edge.b)
+		table.insert(graph.adjacency[edge.b], edge.a)
+		table.insert(graph.edges, { a = edge.a, b = edge.b })
+	end
+	routeGraphs[layout] = graph
+	return graph
 end
 
 local BotService = {}
@@ -132,9 +149,9 @@ local function isHittableZombie(id: string, now: number): boolean
 end
 
 local function spawnPosition(spawnIndex: number): Vector3
-	local points = GreyboxLayout.spawnPoints
+	local points = ActiveMap.get().spawnPoints
 	local point = points[((spawnIndex - 1) % #points) + 1]
-	return Vector3.new(point.x, GreyboxLayout.floorTopY + GreyboxLayout.characterSpawnY, point.z)
+	return Vector3.new(point.x, ActiveMap.get().floorTopY + ActiveMap.get().characterSpawnY, point.z)
 end
 
 local function hasLineOfSight(observer: Model?, target: Model?, from: Vector3, to: Vector3): boolean
@@ -202,11 +219,11 @@ end
 -- 返回成功创建的 Participant 列表；失败的不进入本局。
 function BotService.createBots(count: number, roundId: string, spawnOffset: number): { ParticipantService.Participant }
 	local created: { ParticipantService.Participant } = {}
-	spawnCursor = spawnOffset % #GreyboxLayout.spawnPoints
+	spawnCursor = spawnOffset % #ActiveMap.get().spawnPoints
 	for botIndex = 1, count do
 		local id = ParticipantService.botId(botIndex, roundId)
 		local participant = ParticipantService.registerBot(botIndex, id)
-		spawnCursor = (spawnCursor % #GreyboxLayout.spawnPoints) + 1
+		spawnCursor = (spawnCursor % #ActiveMap.get().spawnPoints) + 1
 		local model = createCharacter(participant, botIndex, spawnCursor)
 		if model ~= nil then
 			ais[id] = {
@@ -238,7 +255,7 @@ function BotService.respawn(participant: ParticipantService.Participant): Model?
 		old:Destroy()
 	end
 
-	spawnCursor = (spawnCursor % #GreyboxLayout.spawnPoints) + 1
+	spawnCursor = (spawnCursor % #ActiveMap.get().spawnPoints) + 1
 	local model = createCharacter(participant, botIndex, spawnCursor)
 	if model ~= nil and ai ~= nil then
 		ai.waypointId = nil
@@ -275,7 +292,7 @@ function BotService.destroyAll()
 end
 
 local function nearestWaypoint(position: Vector3): string?
-	return WaypointRoute.nearest(routeWaypoints, { x = position.X, z = position.Z })
+	return WaypointRoute.nearest(routeGraph().waypoints, { x = position.X, z = position.Z })
 end
 
 -- 丢弃当前寻路状态。逃离/游荡会离开原路线，下次 navigateTo 必须重新选路。
@@ -286,7 +303,7 @@ local function clearNav(ai: BotAI)
 end
 
 local function moveToWaypoint(participant: ParticipantService.Participant, ai: BotAI, waypointId: string)
-	local waypoint = waypointById[waypointId]
+	local waypoint = routeGraph().byId[waypointId]
 	local humanoid = humanoidOf(participant)
 	if waypoint == nil or humanoid == nil then
 		return
@@ -334,7 +351,7 @@ local function navigateTo(participant: ParticipantService.Participant, ai: BotAI
 	end
 
 	local startId = nearestWaypoint(origin)
-	local goalId = WaypointRoute.nearest(routeWaypoints, { x = goal.X, z = goal.Z })
+	local goalId = WaypointRoute.nearest(routeGraph().waypoints, { x = goal.X, z = goal.Z })
 	if startId == nil or goalId == nil or startId == goalId then
 		-- 同一路点区域或图外：退化为直线，交给 Humanoid 处理。
 		clearNav(ai)
@@ -345,7 +362,7 @@ local function navigateTo(participant: ParticipantService.Participant, ai: BotAI
 	-- 到达当前跳点后推进：最后一跳到达时直接走目标，其余情况清空后重新选下一跳。
 	local hopId = ai.navHopId
 	if hopId ~= nil then
-		local hop = waypointById[hopId]
+		local hop = routeGraph().byId[hopId]
 		local arrived = hop ~= nil
 			and horizontalDistance(
 					Vector3.new(hop.position.x, 0, hop.position.z),
@@ -364,7 +381,7 @@ local function navigateTo(participant: ParticipantService.Participant, ai: BotAI
 
 	local nextHopId: string? = ai.navHopId
 	if nextHopId == nil then
-		nextHopId = WaypointRoute.nextHop(routeWaypoints, routeEdges, startId, goalId)
+		nextHopId = WaypointRoute.nextHop(routeGraph().waypoints, routeGraph().edges, startId, goalId)
 		ai.navHopId = nextHopId
 	end
 	if nextHopId == nil then
@@ -372,7 +389,7 @@ local function navigateTo(participant: ParticipantService.Participant, ai: BotAI
 		return
 	end
 
-	local hop = waypointById[nextHopId]
+	local hop = routeGraph().byId[nextHopId]
 	if hop == nil then
 		ai.navHopId = nil
 		humanoid:MoveTo(goal)
@@ -457,7 +474,7 @@ local function stepZombie(id: string, participant: ParticipantService.Participan
 			local current = nearestWaypoint(origin)
 			local options: { string } = {}
 			if current ~= nil then
-				options = adjacency[current]
+				options = routeGraph().adjacency[current]
 			end
 			if #options > 0 then
 				moveToWaypoint(participant, ai, options[math.random(#options)])
@@ -537,7 +554,7 @@ local function stepUnstable(id: string, participant: ParticipantService.Particip
 		local current = nearestWaypoint(root.Position)
 		local options: { string } = {}
 		if current ~= nil then
-			options = adjacency[current]
+			options = routeGraph().adjacency[current]
 		end
 		if #options > 0 then
 			moveToWaypoint(participant, ai, options[math.random(#options)])
@@ -608,8 +625,8 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 	-- §13.2：撤离期人类 Bot 直奔撤离区；进入判定区后由 RoundStateMachine 自动起读条。
 	if humanActions and activeDirector ~= nil and activeDirector.extractionOpen() then
 		MovementService.setSprintIntent(id, true)
-		local center = GreyboxLayout.extractionZone.center
-		navigateTo(participant, ai, Vector3.new(center.x, GreyboxLayout.floorTopY, center.z))
+		local center = ActiveMap.get().extractionZone.center
+		navigateTo(participant, ai, Vector3.new(center.x, ActiveMap.get().floorTopY, center.z))
 		return
 	end
 
@@ -757,12 +774,12 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 		local current = nearestWaypoint(origin)
 		local options: { string } = {}
 		if current ~= nil then
-			options = adjacency[current]
+			options = routeGraph().adjacency[current]
 		end
 		local bestId: string? = nil
 		local bestDistance = -math.huge
 		for _, option in options do
-			local waypoint = waypointById[option]
+			local waypoint = routeGraph().byId[option]
 			if waypoint ~= nil then
 				local dx = waypoint.position.x - threatPosition.X
 				local dz = waypoint.position.z - threatPosition.Z
@@ -828,7 +845,7 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 		local curePickup = activeDirector.nearestCurePickup(origin, PICKUP_PATH_RADIUS)
 		if curePickup ~= nil then
 			ai.waypointId = nil
-			navigateTo(participant, ai, Vector3.new(curePickup.X, GreyboxLayout.floorTopY, curePickup.Z))
+			navigateTo(participant, ai, Vector3.new(curePickup.X, ActiveMap.get().floorTopY, curePickup.Z))
 			return
 		end
 	end
@@ -837,7 +854,7 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 		local pickup = WeaponService.nearestPickupPosition(origin, PICKUP_PATH_RADIUS)
 		if pickup ~= nil then
 			ai.waypointId = nil
-			navigateTo(participant, ai, Vector3.new(pickup.X, GreyboxLayout.floorTopY, pickup.Z))
+			navigateTo(participant, ai, Vector3.new(pickup.X, ActiveMap.get().floorTopY, pickup.Z))
 			return
 		end
 	end
@@ -850,7 +867,7 @@ local function stepHuman(id: string, participant: ParticipantService.Participant
 	local current = nearestWaypoint(origin)
 	local options: { string } = {}
 	if current ~= nil then
-		options = adjacency[current]
+		options = routeGraph().adjacency[current]
 	end
 	if #options > 0 then
 		moveToWaypoint(participant, ai, options[math.random(#options)])

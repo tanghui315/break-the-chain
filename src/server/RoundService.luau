@@ -28,7 +28,7 @@ local RoundStateMachine = require(script.Parent.logic.RoundStateMachine)
 local Cleaner = require(script.Parent.util.Cleaner)
 local CharacterHider = require(script.Parent.util.CharacterHider)
 local GreyboxBuilder = require(script.Parent.world.GreyboxBuilder)
-local GreyboxLayout = require(script.Parent.world.GreyboxLayout)
+local ActiveMap = require(script.Parent.world.ActiveMap)
 local BotService = require(script.Parent.BotService)
 local CombatService = require(script.Parent.CombatService)
 local CureService = require(script.Parent.CureService)
@@ -57,6 +57,10 @@ type Runtime = {
 	firstInfectionLogged: boolean,
 	lastRelinkHintAt: number,
 	lastTreeSnapshotAt: number,
+	-- 遭遇采样（地图可玩性对比）：每名人类最近一次“被丧尸近距离看到”的时间。
+	lastEncounterSampleAt: number,
+	lastEngagedAt: { [string]: number },
+	firstEncounterLogged: boolean,
 	lastInvariantAt: number,
 	exitOpen: boolean,
 	-- §22.2：本局公开 infected+unstable 峰值与参与者数（round_ended 埋点用）。
@@ -71,10 +75,15 @@ local ACTIONS_PER_SECOND = 15
 local MAX_ACTION_BYTES = 64
 local RELINK_HINT_INTERVAL = 0.5
 local TREE_SNAPSHOT_INTERVAL = 30
+-- encounter_sample：CONTEST/EXTRACTION 期间每 5 秒采样一次；40 studs 内且 MapStatic 视线畅通算“遭遇”。
+local ENCOUNTER_SAMPLE_INTERVAL = 5
+local ENCOUNTER_RADIUS = 40
 local INVARIANT_CHECK_INTERVAL = 1
 -- §10.2：Bot 医疗兵可以看到几乎整张灰盒地图（SMALL 约 180×180），30 studs 太小导致守着解药不救。
 local BOT_CURE_SEARCH_RADIUS = 150
 local DEBUG_FORCE_BOT_FILL_ATTRIBUTE = "BTC_DebugForceBotFill"
+-- Studio 专用：强制地图变体（"SMALL" / "MEDIUM"），用于同人数下对比两张图。
+local DEBUG_MAP_VARIANT_ATTRIBUTE = "BTC_DebugMapVariant"
 
 -- BalanceConfig 是 sealed 表，纯模块的 Config 只声明自己用到的字段；在调用边界收窄一次。
 local roundConfig: RoundStateMachine.Config = BalanceConfig :: any
@@ -190,8 +199,8 @@ local function horizontalDistance(a: Vector3, b: Vector3): number
 end
 
 local function extractionCenter(): Vector3
-	local center = GreyboxLayout.extractionZone.center
-	return Vector3.new(center.x, GreyboxLayout.floorTopY, center.z)
+	local center = ActiveMap.get().extractionZone.center
+	return Vector3.new(center.x, ActiveMap.get().floorTopY, center.z)
 end
 
 local function pivotCharacter(character: Model, position: Vector3)
@@ -204,20 +213,20 @@ local function pivotCharacter(character: Model, position: Vector3)
 end
 
 local function humanSpawnPosition(index: number): Vector3
-	local points = GreyboxLayout.spawnPoints
+	local points = ActiveMap.get().spawnPoints
 	local point = points[((index - 1) % #points) + 1]
-	return Vector3.new(point.x, GreyboxLayout.floorTopY + GreyboxLayout.characterSpawnY, point.z)
+	return Vector3.new(point.x, ActiveMap.get().floorTopY + ActiveMap.get().characterSpawnY, point.z)
 end
 
 local function infectionSpawnPosition(index: number): Vector3
-	local points = GreyboxLayout.infectionZones
+	local points = ActiveMap.get().infectionZones
 	local point = points[((index - 1) % #points) + 1]
-	return Vector3.new(point.x, GreyboxLayout.floorTopY + GreyboxLayout.characterSpawnY, point.z)
+	return Vector3.new(point.x, ActiveMap.get().floorTopY + ActiveMap.get().characterSpawnY, point.z)
 end
 
 -- 已撤离/观战者被搬到地图外的观战位置并隐藏（§13.2）。
 local function spectatorPosition(): Vector3
-	return Vector3.new(0, GreyboxLayout.floorTopY + GreyboxLayout.characterSpawnY, GreyboxLayout.mapSize / 2 + 40)
+	return Vector3.new(0, ActiveMap.get().floorTopY + ActiveMap.get().characterSpawnY, ActiveMap.get().mapSize / 2 + 40)
 end
 
 -- ---------------------------------------------------------------------------
@@ -247,7 +256,7 @@ local function setExitOpen(rt: Runtime, open: boolean)
 	end
 	rt.exitOpen = open
 	GreyboxBuilder.setExitOpen(open)
-	local center = GreyboxLayout.extractionZone.center
+	local center = ActiveMap.get().extractionZone.center
 	ZombieCombatService.setExtraction({ x = center.x, y = center.y, z = center.z }, open)
 end
 
@@ -278,7 +287,7 @@ local function isInExtractionZone(participantId: string): boolean
 	if position == nil then
 		return false
 	end
-	return horizontalDistance(position, extractionCenter()) <= GreyboxLayout.extractionZone.diameter / 2
+	return horizontalDistance(position, extractionCenter()) <= ActiveMap.get().extractionZone.diameter / 2
 end
 
 local function canCureTarget(targetId: string): boolean
@@ -391,7 +400,7 @@ local function respawnAtHumanSpawn(rt: Runtime, participantId: string): boolean
 	end
 	local index = rt.spawnIndex[participantId]
 	if index == nil then
-		rt.spawnCursor = (rt.spawnCursor % #GreyboxLayout.spawnPoints) + 1
+		rt.spawnCursor = (rt.spawnCursor % #ActiveMap.get().spawnPoints) + 1
 		index = rt.spawnCursor
 		rt.spawnIndex[participantId] = index
 	end
@@ -467,7 +476,7 @@ local function transitionTo(
 	elseif desired == "EXTRACTED" then
 		-- 解药是阵营共有的稀缺资源（§10.1）：撤离者不能把它带出局，放回医院补给点供其他人类拾取。
 		if CureInventory.heldBy(rt.round.cures, participantId) ~= nil then
-			CureInventory.drop(rt.round.cures, participantId, GreyboxLayout.cureSlots[1])
+			CureInventory.drop(rt.round.cures, participantId, ActiveMap.get().cureSlots[1])
 		end
 		PlayerStateService.setState(participantId, "EXTRACTED")
 		PlayerStateService.setRoot(participantId, false)
@@ -975,7 +984,7 @@ local function characterNeedsRespawn(participant: ParticipantService.Participant
 		return true
 	end
 	local root = character:FindFirstChild("HumanoidRootPart")
-	if root ~= nil and root:IsA("BasePart") and root.Position.Y < GreyboxLayout.killPlaneY then
+	if root ~= nil and root:IsA("BasePart") and root.Position.Y < ActiveMap.get().killPlaneY then
 		return true
 	end
 	return false
@@ -997,7 +1006,7 @@ local function respawnParticipant(rt: Runtime, participant: ParticipantService.P
 
 		-- 重生换下一个出生点，避免在同一个角落反复被堵。
 		local currentIndex = rt.spawnIndex[participant.id] or 1
-		rt.spawnIndex[participant.id] = (currentIndex % #GreyboxLayout.spawnPoints) + 1
+		rt.spawnIndex[participant.id] = (currentIndex % #ActiveMap.get().spawnPoints) + 1
 
 		task.spawn(function()
 			local ok, err = pcall(function()
@@ -1072,7 +1081,7 @@ local function handlePlayerAdded(player: Player)
 		return
 	end
 
-	rt.spawnCursor = (rt.spawnCursor % #GreyboxLayout.spawnPoints) + 1
+	rt.spawnCursor = (rt.spawnCursor % #ActiveMap.get().spawnPoints) + 1
 	rt.spawnIndex[participant.id] = rt.spawnCursor
 	reconcile(rt, now)
 
@@ -1207,6 +1216,94 @@ local function printTreeSnapshot(rt: Runtime, now: number)
 	})
 end
 
+local encounterRayParams = RaycastParams.new()
+encounterRayParams.FilterType = Enum.RaycastFilterType.Include
+
+-- 只用地图几何判断遮挡：Include workspace.Map，角色与道具都不挡视线。
+local function mapLineOfSight(from: Vector3, to: Vector3): boolean
+	local map = Workspace:FindFirstChild("Map")
+	if map == nil then
+		return true
+	end
+	encounterRayParams.FilterDescendantsInstances = { map }
+	local delta = to - from
+	if delta.Magnitude < 0.01 then
+		return true
+	end
+	return Workspace:Raycast(from, delta, encounterRayParams) == nil
+end
+
+-- 地图可玩性指标：人类多久遇不到丧尸（gap = 距上次遭遇的秒数）。只读，不影响规则。
+local function sampleEncounters(rt: Runtime, now: number)
+	local phase = rt.round.phase
+	if phase ~= Phase.CONTEST and phase ~= Phase.EXTRACTION then
+		return
+	end
+	local zombies: { Vector3 } = {}
+	local humans: { { id: string, position: Vector3 } } = {}
+	for _, id in InfectionGraph.participantIds(rt.round.graph) do
+		local state = InfectionGraph.getState(rt.round.graph, id)
+		local position = rootPositionOf(id)
+		if state ~= nil and position ~= nil then
+			if state.state == "INFECTED" and ZombieCombatService.canAct(id, now) then
+				table.insert(zombies, position)
+			elseif state.state == "HUMAN" or state.state == "INCUBATING" then
+				table.insert(humans, { id = id, position = position })
+			end
+		end
+	end
+	if #humans == 0 then
+		return
+	end
+
+	local engaged = 0
+	local gapSum = 0
+	local maxGap = 0
+	local nearestSum = 0
+	for _, human in humans do
+		local nearest = math.huge
+		local seen = false
+		for _, zombie in zombies do
+			local d = horizontalDistance(human.position, zombie)
+			nearest = math.min(nearest, d)
+			if d <= ENCOUNTER_RADIUS and not seen and mapLineOfSight(human.position, zombie) then
+				seen = true
+			end
+		end
+		local last = rt.lastEngagedAt[human.id]
+		if seen then
+			rt.lastEngagedAt[human.id] = now
+			engaged += 1
+		elseif last == nil then
+			-- 从进入 CONTEST 后第一次采样开始计时。
+			rt.lastEngagedAt[human.id] = now
+		end
+		local gap = now - (rt.lastEngagedAt[human.id] :: number)
+		gapSum += gap
+		maxGap = math.max(maxGap, gap)
+		nearestSum += if nearest == math.huge then ActiveMap.get().mapSize else nearest
+	end
+
+	if engaged > 0 and not rt.firstEncounterLogged then
+		rt.firstEncounterLogged = true
+		telemetry("first_encounter", {
+			elapsedSec = string.format("%.1f", now - rt.round.startedAt),
+			map = ActiveMap.getVariant(),
+		})
+	end
+	telemetry("encounter_sample", {
+		map = ActiveMap.getVariant(),
+		phase = phase,
+		elapsedSec = string.format("%.0f", now - rt.round.startedAt),
+		humans = #humans,
+		zombies = #zombies,
+		engaged = engaged,
+		avgGap = string.format("%.1f", gapSum / #humans),
+		maxGap = string.format("%.1f", maxGap),
+		avgNearest = string.format("%.1f", nearestSum / #humans),
+	})
+end
+
 -- 返回 true 表示本局彻底结束，主循环可以清理并开下一局。
 local function tickRuntime(rt: Runtime): boolean
 	local now = serverNow()
@@ -1248,6 +1345,11 @@ local function tickRuntime(rt: Runtime): boolean
 		checkRespawns(rt, now)
 		sendChannelProgress(rt, now)
 		sendRelinkHints(rt, now)
+
+		if now - rt.lastEncounterSampleAt >= ENCOUNTER_SAMPLE_INTERVAL then
+			rt.lastEncounterSampleAt = now
+			sampleEncounters(rt, now)
+		end
 
 		if now - rt.lastTreeSnapshotAt >= TREE_SNAPSHOT_INTERVAL then
 			rt.lastTreeSnapshotAt = now
@@ -1342,6 +1444,19 @@ local function startRound(snapshot: { Player })
 		return
 	end
 
+	-- §14：按人数档的 mapTier 选图（8～15 人 → MEDIUM）；换图时在任何角色出生前重建 workspace.Map。
+	local mapVariant: ActiveMap.Variant = ActiveMap.variantForTier(plan.tier.mapTier)
+	if RunService:IsStudio() then
+		local override: ActiveMap.Variant? =
+			ActiveMap.parseVariant(game:GetService("ServerStorage"):GetAttribute(DEBUG_MAP_VARIANT_ATTRIBUTE))
+		if override ~= nil then
+			mapVariant = override
+		end
+	end
+	if ActiveMap.set(mapVariant) then
+		GreyboxBuilder.build()
+	end
+
 	roundCounter += 1
 	local roundId = string.format("%d-%d", os.time(), roundCounter)
 
@@ -1389,7 +1504,7 @@ local function startRound(snapshot: { Player })
 		function(count: number): number
 			return randomGenerator:NextInteger(1, count)
 		end,
-		GreyboxLayout.cureSlots,
+		ActiveMap.get().cureSlots,
 		previousSeedIds
 	)
 
@@ -1409,6 +1524,9 @@ local function startRound(snapshot: { Player })
 		firstInfectionLogged = false,
 		lastRelinkHintAt = -math.huge,
 		lastTreeSnapshotAt = startedAt,
+		lastEncounterSampleAt = startedAt,
+		lastEngagedAt = {},
+		firstEncounterLogged = false,
 		lastInvariantAt = startedAt,
 		exitOpen = false,
 		infectionPeak = 0,
@@ -1428,7 +1546,7 @@ local function startRound(snapshot: { Player })
 		isPractice = plan.isPractice,
 		seedCount = plan.tier.seedCount,
 		roundDuration = plan.tier.roundSeconds,
-		mapVariant = "GREYBOX_SMALL",
+		mapVariant = mapVariant,
 		-- roundId/serverTimestamp/buildVersion 由 telemetry() 自动补齐
 	})
 	if plan.botCount > 0 then
@@ -1438,7 +1556,7 @@ local function startRound(snapshot: { Player })
 	-- 真人出生点尽量互不重叠；Bot 在 BotService 内部使用自己的游标。
 	for _, participant in liveParticipants do
 		if participant.kind == "Player" then
-			rt.spawnCursor = (rt.spawnCursor % #GreyboxLayout.spawnPoints) + 1
+			rt.spawnCursor = (rt.spawnCursor % #ActiveMap.get().spawnPoints) + 1
 			rt.spawnIndex[participant.id] = rt.spawnCursor
 		end
 	end
@@ -1595,7 +1713,7 @@ local function installDevHook()
 			local lines = {
 				`phase={rt.round.phase} t={string.format("%.1f", now - rt.round.startedAt)}`
 					.. ` roundLeft={string.format("%.1f", rt.round.roundEndsAt - now)} exitOpen={rt.exitOpen}`
-					.. ` extracted={rt.round.extractedCount}/{requiredExtracted(rt)}`,
+					.. ` extracted={rt.round.extractedCount}/{requiredExtracted(rt)} map={ActiveMap.getVariant()}`,
 			}
 			for _, id in InfectionGraph.participantIds(rt.round.graph) do
 				local state = InfectionGraph.getState(rt.round.graph, id)
@@ -1686,6 +1804,12 @@ local function installDevHook()
 			local value = tonumber(count) or 0
 			ServerStorage:SetAttribute(DEBUG_FORCE_BOT_FILL_ATTRIBUTE, if value > 0 then value else nil)
 			return `ok next round fill={value}`
+		end,
+		mapVariant = function(_rt, _now, value)
+			-- 下一局生效；传 "SMALL" / "MEDIUM"，其他值清除覆盖（回到按人数档选图）。
+			local variant = ActiveMap.parseVariant(value)
+			ServerStorage:SetAttribute(DEBUG_MAP_VARIANT_ATTRIBUTE, variant)
+			return `ok next round map={variant or "auto"}`
 		end,
 		roundLeft = function(rt, now, seconds)
 			rt.round.roundEndsAt = now + (tonumber(seconds) or 0)

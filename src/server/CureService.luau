@@ -13,7 +13,7 @@ local VisualTokens = require(ReplicatedStorage.Shared.VisualTokens)
 local CureInventory = require(script.Parent.logic.CureInventory)
 local RoundStateMachine = require(script.Parent.logic.RoundStateMachine)
 local Cleaner = require(script.Parent.util.Cleaner)
-local GreyboxLayout = require(script.Parent.world.GreyboxLayout)
+local ActiveMap = require(script.Parent.world.ActiveMap)
 local ParticipantService = require(script.Parent.ParticipantService)
 local PlayerStateService = require(script.Parent.PlayerStateService)
 
@@ -226,7 +226,7 @@ function CureService.syncVisuals()
 			if position == nil then
 				destroyWorldPickup(itemId)
 			else
-				local y = math.max(position.Y, GreyboxLayout.floorTopY + 1.2)
+				local y = math.max(position.Y, ActiveMap.get().floorTopY + 1.2)
 				local target = Vector3.new(position.X, y, position.Z)
 				local pickup = worldPickups[itemId]
 				if pickup == nil or pickup.part.Parent == nil then

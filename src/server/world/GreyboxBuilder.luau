@@ -1,5 +1,5 @@
 --!strict
--- 把 GreyboxLayout 的纯数据建成 workspace.Map 下的锚定 Part（GDB V1.1 §24.4）。
+-- 把当前地图（ActiveMap.get()）的纯数据建成 workspace.Map 下的锚定 Part（GDB V1.1 §24.4）。
 -- 所有地图 Part 进入 MapStatic 碰撞组：扑咬视线射线只检测该组，角色互相之间不遮挡判定。
 
 local PhysicsService = game:GetService("PhysicsService")
@@ -7,6 +7,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
 local VisualTokens = require(ReplicatedStorage.Shared.VisualTokens)
+local ActiveMap = require(script.Parent.ActiveMap)
 local GreyboxLayout = require(script.Parent.GreyboxLayout)
 
 export type BuildResult = {
@@ -73,8 +74,8 @@ local function makeKillPlane(folder: Folder): Part
 	local part = Instance.new("Part")
 	part.Name = "KillPlane"
 	part.Anchored = true
-	part.Size = Vector3.new(GreyboxLayout.mapSize * 2, 4, GreyboxLayout.mapSize * 2)
-	part.CFrame = CFrame.new(0, GreyboxLayout.killPlaneY - 2, 0)
+	part.Size = Vector3.new(ActiveMap.get().mapSize * 2, 4, ActiveMap.get().mapSize * 2)
+	part.CFrame = CFrame.new(0, ActiveMap.get().killPlaneY - 2, 0)
 	part.Color = VisualTokens.Color.Night
 	part.Material = Enum.Material.SmoothPlastic
 	part.Transparency = 1
@@ -100,7 +101,7 @@ local function makeMarker(
 	part.Name = name
 	part.Anchored = true
 	part.Size = Vector3.new(size, 0.12, size)
-	part.CFrame = CFrame.new(position.x, GreyboxLayout.floorTopY + 0.06, position.z)
+	part.CFrame = CFrame.new(position.x, ActiveMap.get().floorTopY + 0.06, position.z)
 	part.Material = Enum.Material.Neon
 	part.Color = color
 	part.Transparency = transparency
@@ -137,16 +138,16 @@ local function makeMarkerLabel(part: Part, text: string, color: Color3, maxDista
 end
 
 local function makeMarkers(folder: Folder)
-	for index, point in GreyboxLayout.infectionZones do
+	for index, point in ActiveMap.get().infectionZones do
 		makeMarker(folder, `InfectionZone{index}`, point, 14, VisualTokens.Color.Zombie, 0.72)
 	end
-	for index, point in GreyboxLayout.supplyPoints do
+	for index, point in ActiveMap.get().supplyPoints do
 		makeMarker(folder, `SupplyPoint{index}`, point, 5, VisualTokens.Color.Human, 0.45)
 	end
-	for index, point in GreyboxLayout.ammoCratePoints do
+	for index, point in ActiveMap.get().ammoCratePoints do
 		makeMarker(folder, `AmmoCratePoint{index}`, point, 4, VisualTokens.Color.Disconnected, 0.45)
 	end
-	for index, point in GreyboxLayout.cureSlots do
+	for index, point in ActiveMap.get().cureSlots do
 		local pad = makeMarker(folder, `CureSlot{index}`, point, 5, VisualTokens.Color.Cured, 0.42)
 		makeMarkerLabel(pad, "CURE", VisualTokens.Color.Cured, 60)
 	end
@@ -155,9 +156,9 @@ end
 -- §13.2：撤离区 = 非碰撞的蓝白发光垫 + 一个简单门框 + 顶部 EXIT 指示。
 -- 门框同样不碰撞，避免 16 studs 的判定区被几何挤成单路；视觉在 EXTRACTION 阶段点亮。
 local function makeExitGate(folder: Folder): ExitGate
-	local zone = GreyboxLayout.extractionZone
+	local zone = ActiveMap.get().extractionZone
 	local center = zone.center
-	local y = GreyboxLayout.floorTopY
+	local y = ActiveMap.get().floorTopY
 
 	local pad = Instance.new("Part")
 	pad.Name = "ExitZone"
@@ -255,7 +256,7 @@ local function makeFallbackSpawn(folder: Folder): SpawnLocation
 	spawn.Name = "FallbackSpawn"
 	spawn.Anchored = true
 	spawn.Size = Vector3.new(12, 1, 12)
-	spawn.CFrame = CFrame.new(0, GreyboxLayout.floorTopY + 0.5, -70)
+	spawn.CFrame = CFrame.new(0, ActiveMap.get().floorTopY + 0.5, -70)
 	spawn.Transparency = 1
 	spawn.CanCollide = false
 	spawn.CanQuery = false -- 不参与扑咬视线射线（视线只应被 MapStatic 墙体遮挡）
@@ -266,7 +267,7 @@ local function makeFallbackSpawn(folder: Folder): SpawnLocation
 	return spawn
 end
 
--- 重建整张地图。Bootstrap 在服务初始化时调用一次；销毁旧 Map 保证重复启动不会叠加几何。
+-- 重建整张地图。Bootstrap 启动时调用一次，RoundService 换图时再调用；销毁旧 Map 保证不会叠加几何。
 function GreyboxBuilder.build(): BuildResult
 	ensureCollisionGroup()
 
@@ -280,11 +281,11 @@ function GreyboxBuilder.build(): BuildResult
 	local folder = Instance.new("Folder")
 	folder.Name = "Map"
 
-	makeBlock(folder, GreyboxLayout.floor, 0)
-	for index, wall in GreyboxLayout.walls do
+	makeBlock(folder, ActiveMap.get().floor, 0)
+	for index, wall in ActiveMap.get().walls do
 		makeBlock(folder, wall, index)
 	end
-	for index, obstacle in GreyboxLayout.obstacles do
+	for index, obstacle in ActiveMap.get().obstacles do
 		makeBlock(folder, obstacle, index)
 	end
 	makeMarkers(folder)
@@ -297,7 +298,7 @@ function GreyboxBuilder.build(): BuildResult
 	folder.Parent = Workspace
 	return {
 		folder = folder,
-		killPlaneY = GreyboxLayout.killPlaneY,
+		killPlaneY = ActiveMap.get().killPlaneY,
 	}
 end
 

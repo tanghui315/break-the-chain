@@ -15,6 +15,7 @@ local PositionHistory = require(script.Parent.logic.PositionHistory)
 local SupplyPlan = require(script.Parent.logic.SupplyPlan)
 local Weapons = require(script.Parent.logic.Weapons)
 local Cleaner = require(script.Parent.util.Cleaner)
+local ActiveMap = require(script.Parent.world.ActiveMap)
 local GreyboxLayout = require(script.Parent.world.GreyboxLayout)
 local GrabService = require(script.Parent.GrabService)
 local ParticipantService = require(script.Parent.ParticipantService)
@@ -403,7 +404,7 @@ local function ensurePickupFolder()
 end
 
 local function staticPickupPosition(point: GreyboxLayout.Vec3): Vector3
-	return Vector3.new(point.x, GreyboxLayout.floorTopY + 1.2, point.z)
+	return Vector3.new(point.x, ActiveMap.get().floorTopY + 1.2, point.z)
 end
 
 local function selectWeaponInternal(participantId: string, weapon: Weapons.WeaponName, notify: boolean): boolean
@@ -704,13 +705,13 @@ function WeaponService.beginContest(roundCleaner: Cleaner.Cleaner, tier: SupplyP
 	cleaner = roundCleaner
 	ensurePickupFolder()
 
-	local gunPlan = SupplyPlan.plan(tier, GreyboxLayout.supplyPoints, rng)
+	local gunPlan = SupplyPlan.plan(tier, ActiveMap.get().supplyPoints, rng)
 	for _, pointIndex in gunPlan.pistols do
-		local point = GreyboxLayout.supplyPoints[pointIndex]
+		local point = ActiveMap.get().supplyPoints[pointIndex]
 		spawnPickup("Pistol", staticPickupPosition(point), nil)
 	end
 	for _, pointIndex in gunPlan.tasers do
-		local point = GreyboxLayout.supplyPoints[pointIndex]
+		local point = ActiveMap.get().supplyPoints[pointIndex]
 		spawnPickup("Taser", staticPickupPosition(point), nil)
 	end
 
@@ -718,11 +719,11 @@ function WeaponService.beginContest(roundCleaner: Cleaner.Cleaner, tier: SupplyP
 		pistols = 0,
 		tasers = 0,
 		ammoCrates = tier.ammoCrates,
-	}, GreyboxLayout.ammoCratePoints, rng)
+	}, ActiveMap.get().ammoCratePoints, rng)
 	local crateState = SupplyPlan.newCrates(supplyConfig, cratePlan)
 	crates = crateState
 	for crateIndex, crate in crateState.crates do
-		local point = GreyboxLayout.ammoCratePoints[crate.pointIndex]
+		local point = ActiveMap.get().ammoCratePoints[crate.pointIndex]
 		if point ~= nil then
 			local pickup = spawnPickup("Crate", staticPickupPosition(point), crateIndex)
 			pickup.available = SupplyPlan.isCrateAvailable(crateState, crateIndex)

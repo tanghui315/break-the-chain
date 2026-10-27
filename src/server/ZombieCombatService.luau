@@ -13,7 +13,7 @@ local VisualTokens = require(ReplicatedStorage.Shared.VisualTokens)
 local RespawnPicker = require(script.Parent.logic.RespawnPicker)
 local ZombieCombat = require(script.Parent.logic.ZombieCombat)
 local Cleaner = require(script.Parent.util.Cleaner)
-local GreyboxLayout = require(script.Parent.world.GreyboxLayout)
+local ActiveMap = require(script.Parent.world.ActiveMap)
 local ParticipantService = require(script.Parent.ParticipantService)
 local PlayerStateService = require(script.Parent.PlayerStateService)
 
@@ -287,9 +287,9 @@ local function nearestHumanDistance(zone: RespawnPicker.Vec3, humans: { RespawnP
 end
 
 local function spawnCFrameFor(index: number): CFrame
-	local points = GreyboxLayout.infectionZones
+	local points = ActiveMap.get().infectionZones
 	local point = points[((index - 1) % #points) + 1]
-	return CFrame.new(point.x, GreyboxLayout.floorTopY + GreyboxLayout.characterSpawnY, point.z)
+	return CFrame.new(point.x, ActiveMap.get().floorTopY + ActiveMap.get().characterSpawnY, point.z)
 end
 
 -- §22.2：isUnstable 报的是感染身份（PlayerStateService UNSTABLE），不是战斗状态。
@@ -342,7 +342,7 @@ local function respawn(rt: Runtime, now: number)
 
 	local humans = humanRootPositions()
 	local pickedIndex =
-		RespawnPicker.pick(respawnConfig, GreyboxLayout.infectionZones, humans, extractionPoint, extractionActive)
+		RespawnPicker.pick(respawnConfig, ActiveMap.get().infectionZones, humans, extractionPoint, extractionActive)
 	local index: number = pickedIndex or 1
 
 	local deadUntilBefore = rt.combat.deadUntil
@@ -366,7 +366,7 @@ local function respawn(rt: Runtime, now: number)
 		capsApplied = deadUntilBefore < rt.diedAt + rt.fullDeadSeconds - 0.25
 	end
 	local deadSeconds = if rt.diedAt ~= nil then math.max(0, now - rt.diedAt) else 0
-	local zone = GreyboxLayout.infectionZones[index]
+	local zone = ActiveMap.get().infectionZones[index]
 	local nearest = nearestHumanDistance(zone, humans)
 	print(
 		string.format(
@@ -510,7 +510,7 @@ end
 function ZombieCombatService.isBelowKillPlane(participantId: string): boolean
 	local participant = ParticipantService.getById(participantId)
 	local root = if participant ~= nil then rootOf(participant) else nil
-	return root ~= nil and root.Position.Y < GreyboxLayout.killPlaneY
+	return root ~= nil and root.Position.Y < ActiveMap.get().killPlaneY
 end
 
 function ZombieCombatService.hasWindup(participantId: string): boolean
@@ -602,7 +602,7 @@ function ZombieCombatService.handleFall(participantId: string, now: number): boo
 	end
 	local participant = ParticipantService.getById(participantId)
 	local root = if participant ~= nil then rootOf(participant) else nil
-	if root == nil or root.Position.Y >= GreyboxLayout.killPlaneY then
+	if root == nil or root.Position.Y >= ActiveMap.get().killPlaneY then
 		return false
 	end
 
@@ -649,10 +649,10 @@ function ZombieCombatService.step(now: number)
 		local participant = ParticipantService.getById(rt.id)
 		local root = if participant ~= nil then rootOf(participant) else nil
 		if root ~= nil and not rt.hidden then
-			local half = GreyboxLayout.mapSize / 2 - 2
+			local half = ActiveMap.get().mapSize / 2 - 2
 			local position = root.Position
 			if
-				position.Y >= GreyboxLayout.killPlaneY
+				position.Y >= ActiveMap.get().killPlaneY
 				and math.abs(position.X) <= half
 				and math.abs(position.Z) <= half
 			then

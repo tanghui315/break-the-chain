@@ -35,6 +35,8 @@ jobs:
           luau-lsp analyze --platform=standard
           src/server/logic
           src/server/world/GreyboxLayout.luau
+          src/server/world/GreyboxLayoutMedium.luau
+          src/server/world/ActiveMap.luau
           src/shared/BalanceConfig.luau
           src/shared/Types.luau
           src/shared/StateLabels.luau
